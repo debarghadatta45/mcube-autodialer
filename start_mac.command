@@ -53,7 +53,13 @@ if ! nc -z 127.0.0.1 9222 2>/dev/null; then
 fi
 
 echo "[*] Starting Auto-Dialer with floating mini-controller..."
-python3 autodialer.py
+if [ -f "MCUBE_AutoDialer.app/Contents/MacOS/autodialer.pyc" ]; then
+    python3 MCUBE_AutoDialer.app/Contents/MacOS/autodialer.pyc
+elif [ -f "autodialer.pyc" ]; then
+    python3 autodialer.pyc
+else
+    python3 autodialer.py
+fi
 
 echo ""
 echo "[*] Auto-Dialer finished."

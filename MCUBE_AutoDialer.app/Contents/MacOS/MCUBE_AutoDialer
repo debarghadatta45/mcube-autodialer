@@ -53,5 +53,12 @@ if ! nc -z 127.0.0.1 9222 2>/dev/null; then
     fi
 fi
 
-# Run Auto-Dialer
-exec python3 autodialer.py
+# Run compiled bytecode directly - no raw source code needed
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$BIN_DIR/autodialer.pyc" ]; then
+    exec python3 "$BIN_DIR/autodialer.pyc"
+elif [ -f "autodialer.pyc" ]; then
+    exec python3 autodialer.pyc
+else
+    exec python3 autodialer.py
+fi

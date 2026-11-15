@@ -42,6 +42,7 @@ export default function Home() {
   const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const [isRegistered, setIsRegistered] = useState(false);
   const [registeredUser, setRegisteredUser] = useState<any>(null);
+  const [selectedOS, setSelectedOS] = useState<"Windows" | "macOS">("Windows");
 
   // Bug report state
   const [bugData, setBugData] = useState({
@@ -82,6 +83,9 @@ export default function Home() {
       setMessage({ text: data.message, type: "success" });
       setIsRegistered(true);
       setRegisteredUser(data.user);
+      if (formData.os) {
+        setSelectedOS(formData.os as "Windows" | "macOS");
+      }
     } catch (err: any) {
       setMessage({ text: err.message, type: "error" });
     } finally {
@@ -495,79 +499,125 @@ export default function Home() {
                   <CheckCircle2 className="w-6 h-6 text-emerald-400 shrink-0" />
                   <div>
                     <span className="font-bold">Access Granted:</span> Welcome,{" "}
-                    <strong>{registeredUser?.name || "Vedantite"}</strong> ({registeredUser?.email}). Direct download links are ready.
+                    <strong>{registeredUser?.name || "Vedantite"}</strong> ({registeredUser?.email}).
                   </div>
                 </div>
 
-                <div className="grid md:grid-cols-2 gap-4">
-                  {/* Windows Download Card */}
-                  <div className="p-5 rounded-2xl bg-slate-950 border border-slate-800 flex flex-col justify-between space-y-4">
-                    <div>
-                      <div className="flex items-center gap-2 text-cyan-400 font-bold text-base mb-1">
-                        <Laptop className="w-5 h-5" /> Windows Standalone
-                      </div>
-                      <p className="text-xs text-slate-400">
-                        Double-clickable <code>MCUBE_AutoDialer.exe</code>. Automatically launches Chrome on port 9222 and binds to LeadSquared.
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <a
-                        href="/downloads/MCUBE_AutoDialer_Windows.zip"
-                        download="MCUBE_AutoDialer_Windows.zip"
-                        className="w-full py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md transition"
-                      >
-                        <Download className="w-4 h-4" /> Download Windows (.zip)
-                      </a>
-                      <a
-                        href="https://github.com/debarghadatta45/mcube-autodialer/releases/download/v4.0.0/MCUBE_AutoDialer_Windows.zip"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="w-full py-1.5 rounded-lg text-slate-400 hover:text-slate-200 text-xs flex items-center justify-center gap-1 transition"
-                      >
-                        Mirror Link (GitHub Releases v4.0.0) <ExternalLink className="w-3 h-3" />
-                      </a>
-                    </div>
-                  </div>
-
-                  {/* macOS Download Card */}
-                  <div className="p-5 rounded-2xl bg-slate-950 border border-slate-800 flex flex-col justify-between space-y-4">
-                    <div>
-                      <div className="flex items-center gap-2 text-amber-400 font-bold text-base mb-1">
-                        <Apple className="w-5 h-5" /> macOS Package
-                      </div>
-                      <p className="text-xs text-slate-400">
-                        Finder double-clickable <code>start_mac.command</code> & <code>MCUBE_AutoDialer.app</code> with automatic audio chime support.
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <a
-                        href="/downloads/start_mac.command"
-                        download="start_mac.command"
-                        className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md transition"
-                      >
-                        <Download className="w-4 h-4" /> Download macOS Script
-                      </a>
-                      <a
-                        href="https://github.com/debarghadatta45/mcube-autodialer"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="w-full py-1.5 rounded-lg text-slate-400 hover:text-slate-200 text-xs flex items-center justify-center gap-1 transition"
-                      >
-                        GitHub Repository Source <ExternalLink className="w-3 h-3" />
-                      </a>
-                    </div>
-                  </div>
+                {/* Source Code Protection Notice */}
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-center justify-between">
+                  <span className="flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <strong>Code Security:</strong> Pre-compiled binary release. No Python source code exposed.
+                  </span>
+                  <span className="text-[11px] text-slate-500 font-mono">v4.0.0 Production</span>
                 </div>
+
+                {/* OS Toggle Selector */}
+                <div className="flex items-center justify-center gap-2 p-1 rounded-2xl bg-slate-950 border border-slate-800 max-w-sm mx-auto">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOS("Windows")}
+                    className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition ${
+                      selectedOS === "Windows"
+                        ? "bg-cyan-600 text-white shadow-md shadow-cyan-600/30"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <Laptop className="w-4 h-4" /> Windows Version
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOS("macOS")}
+                    className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition ${
+                      selectedOS === "macOS"
+                        ? "bg-amber-600 text-white shadow-md shadow-amber-600/30"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <Apple className="w-4 h-4" /> macOS Version
+                  </button>
+                </div>
+
+                {/* Targeted OS Download Presentation */}
+                {selectedOS === "Windows" ? (
+                  <div className="p-6 rounded-2xl bg-slate-950 border border-cyan-500/30 shadow-xl space-y-4">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="flex items-center gap-2 text-cyan-400 font-black text-lg mb-1">
+                          <Laptop className="w-5 h-5" /> Windows Standalone App
+                        </div>
+                        <p className="text-xs text-slate-400 leading-relaxed max-w-md">
+                          Includes compiled double-clickable <code>MCUBE_AutoDialer.exe</code>. Fully packaged with internal runtime — no Python or coding setup required.
+                        </p>
+                      </div>
+                      <span className="text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+                        .EXE Standalone
+                      </span>
+                    </div>
+
+                    <div className="pt-2 space-y-2">
+                      <a
+                        href={`/api/download?email=${encodeURIComponent(registeredUser?.email || formData.email)}&os=windows`}
+                        className="w-full py-3.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition"
+                      >
+                        <Download className="w-5 h-5" /> Download Windows App (.zip)
+                      </a>
+                      <div className="text-center">
+                        <a
+                          href="https://github.com/debarghadatta45/mcube-autodialer/releases/download/v4.0.0/MCUBE_AutoDialer_Windows.zip"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-slate-500 hover:text-slate-300 inline-flex items-center gap-1 transition"
+                        >
+                          Alternative Mirror (GitHub Release v4.0.0) <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-6 rounded-2xl bg-slate-950 border border-amber-500/30 shadow-xl space-y-4">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="flex items-center gap-2 text-amber-400 font-black text-lg mb-1">
+                          <Apple className="w-5 h-5" /> macOS Application Bundle
+                        </div>
+                        <p className="text-xs text-slate-400 leading-relaxed max-w-md">
+                          Double-clickable <code>MCUBE_AutoDialer.app</code> & <code>start_mac.command</code> built with compiled bytecode. Source code is completely stripped.
+                        </p>
+                      </div>
+                      <span className="text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                        .APP Bundle
+                      </span>
+                    </div>
+
+                    <div className="pt-2 space-y-2">
+                      <a
+                        href={`/api/download?email=${encodeURIComponent(registeredUser?.email || formData.email)}&os=mac`}
+                        className="w-full py-3.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition"
+                      >
+                        <Download className="w-5 h-5" /> Download macOS Package (.zip)
+                      </a>
+                      <div className="text-center">
+                        <a
+                          href="https://github.com/debarghadatta45/mcube-autodialer/releases/download/v4.0.0/MCUBE_AutoDialer_macOS.zip"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-slate-500 hover:text-slate-300 inline-flex items-center gap-1 transition"
+                        >
+                          Alternative Mirror (GitHub Release v4.0.0) <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* 3-Step Setup Instructions */}
                 <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 text-xs text-slate-300 space-y-2">
-                  <div className="font-bold text-white text-sm mb-1">⚡ Simple 3-Step Usage:</div>
+                  <div className="font-bold text-white text-sm mb-1">⚡ Quick Setup Guide:</div>
                   <ol className="list-decimal list-inside space-y-1 text-slate-400">
-                    <li>Extract the downloaded archive into any folder.</li>
-                    <li>Double-click <code>MCUBE_AutoDialer.exe</code> (on Windows) or <code>start_mac.command</code> (on Mac).</li>
-                    <li>Google Chrome will auto-open. Log in to LeadSquared & MCUBE once, and the dialer starts immediately!</li>
+                    <li>Extract the downloaded archive on your computer.</li>
+                    <li>Double-click <code>MCUBE_AutoDialer.exe</code> (Windows) or <code>start_mac.command</code> (macOS).</li>
+                    <li>Google Chrome will auto-launch. Sign in once to LeadSquared and MCUBE, and dialing begins!</li>
                   </ol>
                 </div>
               </div>
