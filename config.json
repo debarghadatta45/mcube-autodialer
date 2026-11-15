@@ -1,0 +1,43 @@
+{
+  "start_page": 1,
+  "cdp_url": "http://localhost:9222",
+  "lsq_manage_url": "https://in21.leadsquared.com/OpportunityManagement?ec=12000",
+  "target_stages": [
+    "Non Contact",
+    "Assigned",
+    "Open - Assigned",
+    "Open Assigned",
+    "Open",
+    "New"
+  ],
+  "exclude_sub_stages": [
+    "Invalid Lead",
+    "Not Interested",
+    "Invalid",
+    "User registered by mistake"
+  ],
+  "ring_timeout_seconds": 38,
+  "delay_between_calls": 2.0,
+  "csv_log_file": "call_history.csv",
+  "save_keywords": [
+    "save",
+    "createactivity",
+    "updateopportunity",
+    "postactivity",
+    "processform",
+    "customaction",
+    "savedetails",
+    "addactivity"
+  ],
+  "ignore_keywords": [
+    "track",
+    "ping",
+    "notification",
+    "keepalive",
+    "log",
+    "telemetry",
+    "analytics",
+    "heartbeat",
+    "getcount"
+  ]
+}
