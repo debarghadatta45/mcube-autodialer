@@ -557,19 +557,26 @@ export default function Home() {
 
                     <div className="pt-2 space-y-2">
                       <a
-                        href={`/api/download?email=${encodeURIComponent(registeredUser?.email || formData.email)}&os=windows`}
+                        href={`/api/download?email=${encodeURIComponent(registeredUser?.email || formData.email)}&os=exe`}
                         className="w-full py-3.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition"
                       >
-                        <Download className="w-5 h-5" /> Download Windows App (.zip)
+                        <Download className="w-5 h-5" /> Download Standalone App (.exe)
                       </a>
-                      <div className="text-center">
+                      <div className="flex items-center justify-center gap-4 text-xs text-slate-400 pt-1">
                         <a
-                          href="https://github.com/debarghadatta45/mcube-autodialer/releases/download/v4.0.0/MCUBE_AutoDialer_Windows.zip"
+                          href={`/api/download?email=${encodeURIComponent(registeredUser?.email || formData.email)}&os=zip`}
+                          className="hover:text-slate-200 underline transition"
+                        >
+                          Download Portable (.zip)
+                        </a>
+                        <span>•</span>
+                        <a
+                          href="https://github.com/debarghadatta45/mcube-autodialer/releases/download/v4.0.0/MCUBE_AutoDialer.exe"
                           target="_blank"
                           rel="noreferrer"
-                          className="text-xs text-slate-500 hover:text-slate-300 inline-flex items-center gap-1 transition"
+                          className="hover:text-slate-200 inline-flex items-center gap-1 transition"
                         >
-                          Alternative Mirror (GitHub Release v4.0.0) <ExternalLink className="w-3 h-3" />
+                          Direct Mirror <ExternalLink className="w-3 h-3" />
                         </a>
                       </div>
                     </div>
@@ -675,7 +682,7 @@ export default function Home() {
                 </a>
 
                 <a
-                  href="https://www.linkedin.com/in/debargha-datta/"
+                  href="https://www.linkedin.com/in/debargha-datta-9119521b0/"
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center gap-3 p-3.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-cyan-500/50 transition group"

@@ -36,23 +36,32 @@ export async function GET(req: Request) {
       }
     );
 
-    const filename = os === "mac" || os === "macos" 
-      ? "MCUBE_AutoDialer_macOS.zip" 
-      : "MCUBE_AutoDialer_Windows.zip";
+    let filename = "MCUBE_AutoDialer.exe";
+    if (os === "zip" || os === "windows_zip") {
+      filename = "MCUBE_AutoDialer_Windows.zip";
+    } else if (os === "mac" || os === "macos") {
+      filename = "MCUBE_AutoDialer_macOS.zip";
+    }
 
     const filePath = path.join(process.cwd(), "public", "downloads", filename);
 
     if (!fs.existsSync(filePath)) {
-      return new NextResponse(`File ${filename} not found on server.`, { status: 404 });
+      // Fallback if single exe not found
+      filename = "MCUBE_AutoDialer_Windows.zip";
     }
 
-    const fileBuffer = fs.readFileSync(filePath);
+    const finalPath = path.join(process.cwd(), "public", "downloads", filename);
+    const fileBuffer = fs.readFileSync(finalPath);
+
+    const contentType = filename.endsWith(".exe") 
+      ? "application/vnd.microsoft.portable-executable" 
+      : "application/zip";
 
     return new NextResponse(fileBuffer, {
       status: 200,
       headers: {
         "Content-Disposition": `attachment; filename="${filename}"`,
-        "Content-Type": "application/zip",
+        "Content-Type": contentType,
         "Content-Length": fileBuffer.length.toString(),
       },
     });

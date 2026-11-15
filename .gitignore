@@ -35,3 +35,4 @@ portal/node_modules/
 portal/.next/
 portal/public/downloads/*.zip
 portal/.env.local
+portal/public/downloads/*.exe
