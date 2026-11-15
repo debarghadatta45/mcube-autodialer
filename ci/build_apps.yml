@@ -1,0 +1,67 @@
+name: Build Standalone Apps (Windows & macOS)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+          python -m playwright install chromium
+
+      - name: Build Windows Executable
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "MCUBE_AutoDialer" --collect-all playwright autodialer.py
+          copy config.json dist\MCUBE_AutoDialer\config.json
+          powershell Compress-Archive -Path dist\MCUBE_AutoDialer\* -DestinationPath dist\MCUBE_AutoDialer_Windows.zip
+
+      - name: Upload Windows App Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCUBE_AutoDialer_Windows
+          path: dist/MCUBE_AutoDialer_Windows.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+          python3 -m playwright install chromium
+
+      - name: Build macOS Application
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "MCUBE_AutoDialer" --collect-all playwright autodialer.py
+          cp config.json dist/MCUBE_AutoDialer/config.json 2>/dev/null || true
+          cd dist
+          zip -r MCUBE_AutoDialer_macOS.zip MCUBE_AutoDialer*
+          cd ..
+
+      - name: Upload macOS App Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCUBE_AutoDialer_macOS
+          path: dist/MCUBE_AutoDialer_macOS.zip

@@ -1,0 +1,57 @@
+#!/bin/bash
+# Resolving app bundle path
+APP_CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
+APP_ROOT="$(cd "$APP_CONTENTS/.." && pwd)"
+PARENT_DIR="$(cd "$APP_ROOT/.." && pwd)"
+
+# Change to project root directory
+if [ -f "$PARENT_DIR/autodialer.py" ]; then
+    WORKDIR="$PARENT_DIR"
+else
+    WORKDIR="$APP_ROOT"
+fi
+cd "$WORKDIR"
+
+# Check Python 3
+PYTHON_BIN=""
+for cmd in python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do
+    if command -v "$cmd" &>/dev/null; then
+        PYTHON_BIN="$cmd"
+        break
+    fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+    osascript -e 'display alert "Python 3 Not Found" message "Please install Python 3 or run via Terminal: brew install python"'
+    exit 1
+fi
+
+# Ensure virtual environment and dependencies
+if [ ! -d ".venv_mac" ]; then
+    "$PYTHON_BIN" -m venv .venv_mac
+    source .venv_mac/bin/activate
+    pip install -r requirements.txt
+    python3 -m playwright install chromium
+else
+    source .venv_mac/bin/activate
+fi
+
+# Launch Chrome if not running on 9222
+if ! nc -z 127.0.0.1 9222 2>/dev/null; then
+    CHROME_APP="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    PROFILE_DIR="$HOME/chrome-autodial-profile"
+    mkdir -p "$PROFILE_DIR"
+    if [ -f "$CHROME_APP" ]; then
+        "$CHROME_APP" \
+            --remote-debugging-port=9222 \
+            --user-data-dir="$PROFILE_DIR" \
+            --no-first-run \
+            --no-default-browser-check \
+            "https://in21.leadsquared.com/OpportunityManagement?ec=12000" \
+            "https://dialer.mcube.com/index.html" >/dev/null 2>&1 &
+        sleep 2
+    fi
+fi
+
+# Run Auto-Dialer
+exec python3 autodialer.py

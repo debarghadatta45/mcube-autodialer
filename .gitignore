@@ -23,3 +23,9 @@ mcube_sniff.log
 *.swo
 Thumbs.db
 Desktop.ini
+
+# PyInstaller & Builds
+build/
+dist/
+*.spec
+.venv_mac/

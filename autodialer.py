@@ -18,6 +18,9 @@ import datetime
 import json
 import os
 import re
+import shutil
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -30,6 +33,38 @@ try:
     import winsound
 except ImportError:
     winsound = None
+
+# ============================================================
+# APP DIRECTORY & LOGGING CONFIGURATION
+# ============================================================
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(sys.executable)
+    # If running inside macOS .app bundle, point to folder containing the .app
+    if sys.platform == "darwin" and ".app/Contents/MacOS" in APP_DIR:
+        APP_DIR = os.path.abspath(os.path.join(APP_DIR, "../../.."))
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+STATE_PATH = os.path.join(APP_DIR, "session_state.json")
+LOG_PATH = os.path.join(APP_DIR, "autodialer.log")
+
+class _FileLogger:
+    def __init__(self, filepath):
+        self.filepath = filepath
+    def write(self, data):
+        try:
+            with open(self.filepath, "a", encoding="utf-8", errors="replace") as f:
+                f.write(data)
+        except Exception:
+            pass
+    def flush(self):
+        pass
+
+if sys.stdout is None:
+    sys.stdout = _FileLogger(LOG_PATH)
+if sys.stderr is None:
+    sys.stderr = _FileLogger(LOG_PATH)
 
 # ============================================================
 # CONFIGURATION
@@ -56,9 +91,6 @@ EXCLUDE_SUB_STAGES = [
 RING_TIMEOUT = 38         # seconds before marking DNP
 DELAY_AFTER_DNP = 2       # seconds pause between calls
 DELAY_AFTER_CONNECTED = 2 # seconds after disposition before next call
-
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-STATE_PATH = os.path.join(os.path.dirname(__file__), "session_state.json")
 
 if os.path.exists(CONFIG_PATH):
     try:
@@ -94,7 +126,112 @@ def log(msg, level="INFO"):
     }
     reset = "\033[0m"
     c = colors.get(level, "")
-    print(f"[{ts()}] {c}[{level}]{reset} {msg}")
+    line = f"[{ts()}] [{level}] {msg}"
+    formatted = f"[{ts()}] {c}[{level}]{reset} {msg}"
+    try:
+        print(formatted)
+    except Exception:
+        pass
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as _lf:
+            _lf.write(line + "\n")
+    except Exception:
+        pass
+
+def is_port_open(host="127.0.0.1", port=9222):
+    """Check if remote debugging port is open."""
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+def get_chrome_executable():
+    """Locate Google Chrome executable across Windows and macOS."""
+    if sys.platform == "win32":
+        candidates = [
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Google\\Chrome\\Application\\chrome.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "Google\\Chrome\\Application\\chrome.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google\\Chrome\\Application\\chrome.exe"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+    elif sys.platform == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+    else:
+        for cmd in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
+            found = shutil.which(cmd)
+            if found:
+                return found
+    return None
+
+def auto_launch_chrome():
+    """Ensure Chrome is running with remote debugging port 9222."""
+    if is_port_open("127.0.0.1", 9222):
+        return True
+
+    chrome_bin = get_chrome_executable()
+    if not chrome_bin:
+        log("Google Chrome binary not found in standard paths! Please launch Chrome manually with port 9222.", "WARN")
+        return False
+
+    if sys.platform == "win32":
+        profile_dir = r"C:\chrome-autodial-profile"
+    else:
+        profile_dir = os.path.expanduser("~/chrome-autodial-profile")
+
+    try:
+        os.makedirs(profile_dir, exist_ok=True)
+    except Exception:
+        pass
+
+    args = [
+        chrome_bin,
+        "--remote-debugging-port=9222",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        LSQ_MANAGE_URL,
+        "https://dialer.mcube.com/index.html"
+    ]
+
+    log(f"Auto-launching Google Chrome on port 9222...", "INFO")
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log(f"Failed to auto-launch Chrome: {e}", "ERR")
+        return False
+
+    # Wait up to 12 seconds for port 9222 to be available
+    for _ in range(12):
+        time.sleep(1)
+        if is_port_open("127.0.0.1", 9222):
+            log("Google Chrome is now running and listening on port 9222!", "OK")
+            return True
+
+    return False
+
+def play_connected_chime():
+    """Cross-platform audible alert when call connects."""
+    try:
+        if sys.platform == "win32" and winsound:
+            winsound.Beep(1000, 300)
+            winsound.Beep(1400, 200)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
+        else:
+            print("\a", end="", flush=True)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -331,24 +468,28 @@ class AutoDialer:
         self.processed = set()
 
     async def connect(self):
-        """Connect to Chrome via CDP and find active pages with retry support."""
+        """Connect to Chrome via CDP and find active pages with retry and auto-launch support."""
+        if not is_port_open("127.0.0.1", 9222):
+            log("Chrome is not listening on port 9222. Auto-launching Google Chrome...", "INFO")
+            auto_launch_chrome()
+
         log("Connecting to Chrome on CDP port 9222...", "INFO")
         self.pw = await async_playwright().start()
 
         connected = False
-        for attempt in range(1, 6):
+        for attempt in range(1, 8):
             try:
                 self.browser = await self.pw.chromium.connect_over_cdp(CDP_URL)
                 connected = True
                 break
             except Exception as e:
                 if attempt == 1:
-                    log(f"Waiting for Chrome on port 9222 (Attempt {attempt}/5)...", "WARN")
+                    log(f"Waiting for Chrome on port 9222 (Attempt {attempt}/7)...", "WARN")
                 await asyncio.sleep(2)
 
         if not connected:
             log(f"Cannot connect to Chrome on {CDP_URL}", "ERR")
-            log("Please make sure Google Chrome was launched via 'launch_chrome.bat'!", "WARN")
+            log("Please make sure Google Chrome is open with remote debugging enabled on port 9222!", "WARN")
             await self.pw.stop()
             return False
 
@@ -1179,12 +1320,7 @@ class AutoDialer:
                     log(f"CALL CONNECTED: {lead['name']}", "OK")
                     self.connected += 1
                     self.ctrl.stats(self.dialed, self.connected, self.dnp)
-                    if winsound:
-                        try:
-                            winsound.Beep(1000, 300)
-                            winsound.Beep(1400, 200)
-                        except Exception:
-                            pass
+                    play_connected_chime()
                     await self.wait_for_disposition()
                     await self.return_to_grid()
 
