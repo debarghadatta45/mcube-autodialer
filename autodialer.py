@@ -185,14 +185,15 @@ def auto_launch_chrome():
         return False
 
     if sys.platform == "win32":
-        profile_dir = r"C:\chrome-autodial-profile"
+        base_dir = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+        profile_dir = os.path.join(base_dir, "MCUBE_AutoDialer", "chrome-profile")
     else:
         profile_dir = os.path.expanduser("~/chrome-autodial-profile")
 
     try:
         os.makedirs(profile_dir, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"Profile directory notice: {e}", "WARN")
 
     args = [
         chrome_bin,
@@ -242,6 +243,7 @@ class MiniController:
         self.loop = loop
         self.stopped = False
         self.paused = False
+        self.retry_connect_requested = False
         self.customer_answered = asyncio.Event()
         self.skip_lead = asyncio.Event()
         self.disposition_done = asyncio.Event()
@@ -262,7 +264,7 @@ class MiniController:
         try:
             self.root = tk.Tk()
             self.root.title("Auto-Dialer Control")
-            self.root.geometry("340x305+25+25")
+            self.root.geometry("340x350+25+25")
             self.root.attributes("-topmost", True)
             self.root.resizable(False, False)
             self.root.configure(bg="#1E1E2E")
@@ -270,11 +272,13 @@ class MiniController:
             self._status_lbl = tk.Label(
                 self.root,
                 text="STARTING...",
-                font=("Segoe UI", 11, "bold"),
+                font=("Segoe UI", 10, "bold"),
                 fg="#F9E2AF",
-                bg="#1E1E2E"
+                bg="#1E1E2E",
+                wraplength=320,
+                justify="left"
             )
-            self._status_lbl.pack(pady=(10, 2), padx=10, anchor="w")
+            self._status_lbl.pack(pady=(8, 2), padx=10, anchor="w")
 
             self._lead_lbl = tk.Label(
                 self.root,
@@ -293,6 +297,16 @@ class MiniController:
                 bg="#1E1E2E"
             )
             self._stats_lbl.pack(padx=10, anchor="w", pady=(0, 4))
+
+            # Chrome Connection Action Row (Quick Launch & Reconnect)
+            chrome_frame = tk.Frame(self.root, bg="#1E1E2E")
+            chrome_frame.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+            tk.Button(chrome_frame, text="🚀 Launch Chrome", font=("Segoe UI", 8, "bold"), bg="#89DCEB", fg="#11111B",
+                      cursor="hand2", command=self._on_launch_chrome).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+
+            tk.Button(chrome_frame, text="🔄 Connect", font=("Segoe UI", 8, "bold"), bg="#FAB387", fg="#11111B",
+                      cursor="hand2", command=self._on_retry_connect).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
             # Page Navigation Row (Jump to any page anytime)
             page_frame = tk.Frame(self.root, bg="#1E1E2E")
@@ -371,6 +385,14 @@ class MiniController:
         except Exception as e:
             print(f"[GUI] Controller Error: {e}")
 
+    def _on_launch_chrome(self):
+        self.status("🚀 Launching Google Chrome...")
+        threading.Thread(target=auto_launch_chrome, daemon=True).start()
+
+    def _on_retry_connect(self):
+        self.status("🔄 Connecting to Chrome on port 9222...")
+        self.retry_connect_requested = True
+
     def _on_jump_page(self):
         try:
             val = int(self._page_entry.get().strip())
@@ -424,30 +446,36 @@ class MiniController:
         self.stopped = True
         self.loop.call_soon_threadsafe(self.skip_lead.set)
         try:
-            self.root.quit()
+            if self.root:
+                self.root.after(0, self.root.quit)
         except Exception:
             pass
 
     def status(self, text):
         if self.root and self._status_lbl:
             try:
-                self.root.after(0, lambda: self._status_lbl.config(text=text))
+                self.root.after(0, lambda: self._safe_config_label(self._status_lbl, text))
             except Exception:
                 pass
+
+    def _safe_config_label(self, lbl, text):
+        try:
+            lbl.config(text=text)
+        except Exception:
+            pass
 
     def lead(self, name):
         if self.root and self._lead_lbl:
             try:
-                self.root.after(0, lambda: self._lead_lbl.config(text=f"Lead: {name[:30]}"))
+                self.root.after(0, lambda: self._safe_config_label(self._lead_lbl, f"Lead: {name[:30]}"))
             except Exception:
                 pass
 
     def stats(self, dialed, connected, dnp):
         if self.root and self._stats_lbl:
             try:
-                self.root.after(0, lambda: self._stats_lbl.config(
-                    text=f"Dialed: {dialed} | Connected: {connected} | DNP: {dnp}"
-                ))
+                txt = f"Dialed: {dialed} | Connected: {connected} | DNP: {dnp}"
+                self.root.after(0, lambda: self._safe_config_label(self._stats_lbl, txt))
             except Exception:
                 pass
 
@@ -468,34 +496,39 @@ class AutoDialer:
         self.processed = set()
 
     async def connect(self):
-        """Connect to Chrome via CDP and find active pages with retry and auto-launch support."""
-        if not is_port_open("127.0.0.1", 9222):
-            log("Chrome is not listening on port 9222. Auto-launching Google Chrome...", "INFO")
-            auto_launch_chrome()
+        """Connect to Chrome via CDP and find active pages with resilient auto-retry."""
+        while not self.ctrl.stopped:
+            if not is_port_open("127.0.0.1", 9222):
+                self.ctrl.status("⚠️ WAITING FOR CHROME (PORT 9222)...")
+                log("Chrome is not listening on port 9222. Auto-launching Google Chrome...", "INFO")
+                auto_launch_chrome()
 
-        log("Connecting to Chrome on CDP port 9222...", "INFO")
-        self.pw = await async_playwright().start()
+            if is_port_open("127.0.0.1", 9222):
+                self.ctrl.status("🔄 CONNECTING TO CHROME CDP...")
+                try:
+                    if not self.pw:
+                        self.pw = await async_playwright().start()
+                    self.browser = await self.pw.chromium.connect_over_cdp(CDP_URL)
+                    log("Connected to Google Chrome successfully!", "OK")
+                    self.ctrl.status("🔍 SEARCHING TABS...")
+                    await self.find_pages()
+                    return True
+                except Exception as e:
+                    log(f"CDP connection attempt error: {e}", "WARN")
+                    self.ctrl.status("⚠️ RETRYING CHROME CDP CONNECTION...")
+            else:
+                self.ctrl.status("⚠️ CHROME NOT DETECTED: CLICK '🚀 LAUNCH CHROME'")
 
-        connected = False
-        for attempt in range(1, 8):
-            try:
-                self.browser = await self.pw.chromium.connect_over_cdp(CDP_URL)
-                connected = True
-                break
-            except Exception as e:
-                if attempt == 1:
-                    log(f"Waiting for Chrome on port 9222 (Attempt {attempt}/7)...", "WARN")
-                await asyncio.sleep(2)
+            # Wait before re-checking, or wake immediately if user clicked retry
+            for _ in range(6):
+                if self.ctrl.stopped:
+                    return False
+                if self.ctrl.retry_connect_requested:
+                    self.ctrl.retry_connect_requested = False
+                    break
+                await asyncio.sleep(0.5)
 
-        if not connected:
-            log(f"Cannot connect to Chrome on {CDP_URL}", "ERR")
-            log("Please make sure Google Chrome is open with remote debugging enabled on port 9222!", "WARN")
-            await self.pw.stop()
-            return False
-
-        log("Connected to Google Chrome successfully!", "OK")
-        await self.find_pages()
-        return True
+        return False
 
     async def find_pages(self):
         """Dynamically detect or refresh LeadSquared and MCUBE pages."""
@@ -1353,9 +1386,34 @@ class AutoDialer:
                     pass
 
 
+def show_fatal_error(title, msg):
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, str(msg), str(title), 0x10)
+            return
+    except Exception:
+        pass
+    try:
+        import tkinter.messagebox as mb
+        mb.showerror(str(title), str(msg))
+    except Exception:
+        pass
+    print(f"[{title}] {msg}")
+
 if __name__ == "__main__":
     try:
         asyncio.run(AutoDialer().run())
     except KeyboardInterrupt:
         print("\n[!] Auto-Dialer stopped.")
         sys.exit(0)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"\n[{ts()}] [CRITICAL] {tb}\n")
+        except Exception:
+            pass
+        show_fatal_error("MCUBE Auto-Dialer Error", f"MCUBE Auto-Dialer encountered an error:\n\n{e}\n\nPlease check autodialer.log or ensure Google Chrome is available.")
+        sys.exit(1)

@@ -37,25 +37,22 @@ export async function GET(req: Request) {
     );
 
     let filename = "MCUBE_AutoDialer.exe";
-    if (os === "zip" || os === "windows_zip") {
-      filename = "MCUBE_AutoDialer_Windows.zip";
-    } else if (os === "mac" || os === "macos") {
-      filename = "MCUBE_AutoDialer_macOS.zip";
+    if (os === "mac" || os === "macos" || os === "dmg") {
+      filename = "MCUBE_AutoDialer.dmg";
     }
 
     const filePath = path.join(process.cwd(), "public", "downloads", filename);
 
     if (!fs.existsSync(filePath)) {
-      // Fallback if single exe not found
-      filename = "MCUBE_AutoDialer_Windows.zip";
+      return new NextResponse(`File ${filename} not found on server.`, { status: 404 });
     }
 
-    const finalPath = path.join(process.cwd(), "public", "downloads", filename);
-    const fileBuffer = fs.readFileSync(finalPath);
+    const fileBuffer = fs.readFileSync(filePath);
 
-    const contentType = filename.endsWith(".exe") 
-      ? "application/vnd.microsoft.portable-executable" 
-      : "application/zip";
+    let contentType = "application/vnd.microsoft.portable-executable";
+    if (filename.endsWith(".dmg")) {
+      contentType = "application/x-apple-diskimage";
+    }
 
     return new NextResponse(fileBuffer, {
       status: 200,
