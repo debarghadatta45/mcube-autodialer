@@ -779,9 +779,9 @@ export default function Home() {
             Automating OpportunityManagement (ec=12000) & MCUBE Soft-Phone WebRTC.
           </p>
           <div className="pt-2">
-            <Link href="/admin" className="text-slate-600 hover:text-emerald-400 transition-colors inline-flex items-center gap-1 font-mono">
+            <a href="/admin" className="text-slate-600 hover:text-emerald-400 transition-colors inline-flex items-center gap-1 font-mono">
               <ShieldCheck className="w-3 h-3" /> Executive Admin Portal
-            </Link>
+            </a>
           </div>
         </footer>
       </main>

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import clientPromise from "@/lib/mongodb";
-import { verifyAdminToken } from "../login/route";
+import { verifyAdminToken } from "@/lib/adminAuth";
 
 export async function GET(req: Request) {
   try {
