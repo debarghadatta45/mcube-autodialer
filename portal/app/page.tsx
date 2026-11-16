@@ -18,7 +18,8 @@ import {
   Sparkles,
   Bug,
   Mail,
-  Phone
+  Phone,
+  Play
 } from "lucide-react";
 
 function LinkedInIcon(props: React.SVGProps<SVGSVGElement>) {
@@ -150,6 +151,9 @@ export default function Home() {
             <a href="#proof" className="hover:text-orange-400 transition">
               Calling Proof
             </a>
+            <a href="#tutorial" className="hover:text-orange-400 transition flex items-center gap-1.5 text-orange-400 font-semibold">
+              <Play className="w-3.5 h-3.5 fill-orange-400 text-orange-400" /> Tutorial
+            </a>
             <a href="#download" className="hover:text-orange-400 transition">
               Download App
             </a>
@@ -196,8 +200,14 @@ export default function Home() {
               <Download className="w-5 h-5" /> Download for Windows & macOS
             </a>
             <a
-              href="#proof"
+              href="#tutorial"
               className="px-6 py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 font-medium text-slate-200 border border-slate-700 transition flex items-center gap-2 text-base"
+            >
+              <Play className="w-4 h-4 fill-orange-400 text-orange-400" /> Watch Video Tutorial
+            </a>
+            <a
+              href="#proof"
+              className="px-6 py-3.5 rounded-xl bg-slate-900/80 hover:bg-slate-800 font-medium text-slate-300 border border-slate-800 transition flex items-center gap-2 text-base"
             >
               <TrendingUp className="w-5 h-5 text-emerald-400" /> View Calling Metrics
             </a>
@@ -396,6 +406,65 @@ export default function Home() {
                   </tr>
                 </tbody>
               </table>
+            </div>
+          </div>
+        </section>
+
+        {/* SECTION: VIDEO TUTORIAL & DEMO */}
+        <section id="tutorial" className="scroll-mt-24 space-y-6">
+          <div className="text-center space-y-2">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-orange-500/10 border border-orange-500/20 text-orange-400 text-xs font-semibold">
+              <Play className="w-3.5 h-3.5 fill-orange-400 text-orange-400" /> 1-Minute Walkthrough
+            </div>
+            <h2 className="text-2xl md:text-3xl font-black text-white">How the Auto-Dialer Works</h2>
+            <p className="text-slate-400 text-sm md:text-base max-w-xl mx-auto">
+              Watch this quick demo showing Chrome remote debugging connection, automated LeadSquared dialing, and live MCUBE WebRTC call tracking.
+            </p>
+          </div>
+
+          <div className="rounded-3xl bg-slate-900 border border-slate-800 p-4 sm:p-6 md:p-8 space-y-6 shadow-2xl">
+            {/* 16:9 Responsive Video Container */}
+            <div className="relative w-full aspect-video rounded-2xl overflow-hidden border border-slate-700/80 shadow-2xl bg-black group">
+              <iframe
+                src="https://www.youtube.com/embed/Fx189CmgM58"
+                title="MCUBE Auto-Dialer Short Tutorial"
+                className="absolute top-0 left-0 w-full h-full border-0 rounded-2xl"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+              />
+            </div>
+
+            {/* Video Walkthrough Highlights */}
+            <div className="grid sm:grid-cols-3 gap-4 pt-2">
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-1.5">
+                <div className="text-orange-400 font-bold text-xs uppercase tracking-wider flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-orange-500/20 flex items-center justify-center text-[10px]">1</span>
+                  Launch & Connect
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Start the standalone executable. It auto-launches Google Chrome on port 9222 with LeadSquared and MCUBE tabs.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-1.5">
+                <div className="text-emerald-400 font-bold text-xs uppercase tracking-wider flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-[10px]">2</span>
+                  Hands-Free Dialing
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Automatically clicks through leads matching target stages, skips invalid leads, and eliminates 5 manual clicks per call.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-1.5">
+                <div className="text-blue-400 font-bold text-xs uppercase tracking-wider flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-blue-500/20 flex items-center justify-center text-[10px]">3</span>
+                  Smart Connect Pause
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  When the customer answers, the dialer automatically pauses so you can speak and save disposition before moving to the next lead.
+                </p>
+              </div>
             </div>
           </div>
         </section>
