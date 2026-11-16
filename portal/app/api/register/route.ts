@@ -16,8 +16,9 @@ export async function POST(req: Request) {
 
     const cleanEmail = email.trim().toLowerCase();
 
-    // Verify @vedantu.com domain
-    if (!cleanEmail.endsWith("@vedantu.com")) {
+    // Verify @vedantu.com domain or admin email
+    const isAuthorized = cleanEmail.endsWith("@vedantu.com") || cleanEmail === "dadeb349@gmail.com";
+    if (!isAuthorized) {
       return NextResponse.json(
         {
           error: "Access Denied: Only official @vedantu.com email addresses are authorized to register."
