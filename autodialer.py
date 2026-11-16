@@ -149,16 +149,43 @@ def is_port_open(host="127.0.0.1", port=9222):
 def get_chrome_executable():
     """Locate Google Chrome executable across Windows and macOS."""
     if sys.platform == "win32":
+        # 1. Check Windows Registry
+        try:
+            import winreg
+            for root_key in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for subkey in (
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe",
+                    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+                ):
+                    try:
+                        with winreg.OpenKey(root_key, subkey) as k:
+                            val, _ = winreg.QueryValueEx(k, "")
+                            if val and os.path.isfile(val):
+                                return val
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+        # 2. Check Standard Directory Paths
         candidates = [
-            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Google\\Chrome\\Application\\chrome.exe"),
-            os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "Google\\Chrome\\Application\\chrome.exe"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google\\Chrome\\Application\\chrome.exe"),
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("ProgramW6432", r"C:\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
         ]
         for p in candidates:
-            if os.path.isfile(p):
+            if p and os.path.isfile(p):
                 return p
+
+        # 3. Check PATH
+        for c in ["chrome.exe", "chrome"]:
+            f = shutil.which(c)
+            if f and os.path.isfile(f):
+                return f
+
     elif sys.platform == "darwin":
         candidates = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -167,6 +194,10 @@ def get_chrome_executable():
         for p in candidates:
             if os.path.isfile(p):
                 return p
+        for c in ["google-chrome", "chromium"]:
+            f = shutil.which(c)
+            if f:
+                return f
     else:
         for cmd in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
             found = shutil.which(cmd)
@@ -175,14 +206,8 @@ def get_chrome_executable():
     return None
 
 def auto_launch_chrome():
-    """Ensure Chrome is running with remote debugging port 9222."""
-    if is_port_open("127.0.0.1", 9222):
-        return True
-
+    """Ensure Chrome is running with remote debugging port 9222 and open LS + MCUBE."""
     chrome_bin = get_chrome_executable()
-    if not chrome_bin:
-        log("Google Chrome binary not found in standard paths! Please launch Chrome manually with port 9222.", "WARN")
-        return False
 
     if sys.platform == "win32":
         base_dir = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
@@ -195,31 +220,55 @@ def auto_launch_chrome():
     except Exception as e:
         log(f"Profile directory notice: {e}", "WARN")
 
-    args = [
-        chrome_bin,
-        "--remote-debugging-port=9222",
-        f"--user-data-dir={profile_dir}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        LSQ_MANAGE_URL,
-        "https://dialer.mcube.com/index.html"
-    ]
+    if not is_port_open("127.0.0.1", 9222):
+        if not chrome_bin:
+            log("Google Chrome binary not found! Please install Chrome or launch it manually with port 9222.", "ERR")
+            return False
 
-    log(f"Auto-launching Google Chrome on port 9222...", "INFO")
-    try:
-        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        log(f"Failed to auto-launch Chrome: {e}", "ERR")
+        log("Auto-launching Google Chrome on port 9222 with LS and MCUBE tabs...", "INFO")
+        try:
+            if sys.platform == "win32":
+                cmd = f'start "" "{chrome_bin}" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir="{profile_dir}" --no-first-run --no-default-browser-check --new-window "{LSQ_MANAGE_URL}" "https://dialer.mcube.com/index.html"'
+                subprocess.Popen(cmd, shell=True)
+            elif sys.platform == "darwin":
+                subprocess.Popen([
+                    chrome_bin,
+                    "--remote-debugging-port=9222",
+                    "--remote-allow-origins=*",
+                    f"--user-data-dir={profile_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--new-window",
+                    LSQ_MANAGE_URL,
+                    "https://dialer.mcube.com/index.html"
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen([
+                    chrome_bin,
+                    "--remote-debugging-port=9222",
+                    "--remote-allow-origins=*",
+                    f"--user-data-dir={profile_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--new-window",
+                    LSQ_MANAGE_URL,
+                    "https://dialer.mcube.com/index.html"
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            log(f"Failed to auto-launch Chrome: {e}", "ERR")
+            return False
+
+        # Wait up to 15 seconds for port 9222 to become available
+        for _ in range(15):
+            time.sleep(1)
+            if is_port_open("127.0.0.1", 9222):
+                log("Google Chrome is now running and listening on port 9222!", "OK")
+                return True
+
         return False
-
-    # Wait up to 12 seconds for port 9222 to be available
-    for _ in range(12):
-        time.sleep(1)
-        if is_port_open("127.0.0.1", 9222):
-            log("Google Chrome is now running and listening on port 9222!", "OK")
-            return True
-
-    return False
+    else:
+        log("Google Chrome is already listening on port 9222.", "OK")
+        return True
 
 def play_connected_chime():
     """Cross-platform audible alert when call connects."""
@@ -334,17 +383,17 @@ class MiniController:
                 bg="#A6E3A1",
                 fg="#11111B",
                 cursor="hand2",
-                command=lambda: self.loop.call_soon_threadsafe(self.customer_answered.set)
+                command=self._on_customer_answered
             ).pack(fill=tk.X, padx=10, pady=2)
 
             tk.Button(
                 self.root,
                 text="💾 Disposition Done (Resume)",
-                font=("Segoe UI", 9),
+                font=("Segoe UI", 9, "bold"),
                 bg="#89B4FA",
                 fg="#11111B",
                 cursor="hand2",
-                command=lambda: self.loop.call_soon_threadsafe(self.disposition_done.set)
+                command=self._on_disposition_done
             ).pack(fill=tk.X, padx=10, pady=2)
 
             row = tk.Frame(self.root, bg="#1E1E2E")
@@ -384,6 +433,17 @@ class MiniController:
             self.root.mainloop()
         except Exception as e:
             print(f"[GUI] Controller Error: {e}")
+
+    def _on_customer_answered(self):
+        self.status("📞 CUSTOMER ANSWERED (AUTO-PAUSED)")
+        self.paused = True
+        self.loop.call_soon_threadsafe(self.customer_answered.set)
+
+    def _on_disposition_done(self):
+        self.paused = False
+        self.status("▶ RESUMING DIALER...")
+        self.loop.call_soon_threadsafe(self.disposition_done.set)
+        self.loop.call_soon_threadsafe(self.resume_event.set)
 
     def _on_launch_chrome(self):
         self.status("🚀 Launching Google Chrome...")
@@ -439,6 +499,12 @@ class MiniController:
 
     def _toggle_pause(self):
         self.paused = not self.paused
+        if not self.paused:
+            self.status("▶ RESUMED")
+            self.loop.call_soon_threadsafe(self.resume_event.set)
+            self.loop.call_soon_threadsafe(self.disposition_done.set)
+        else:
+            self.status("⏸️ PAUSED")
         if not self.paused:
             self.loop.call_soon_threadsafe(self.resume_event.set)
 
@@ -501,7 +567,9 @@ class AutoDialer:
             if not is_port_open("127.0.0.1", 9222):
                 self.ctrl.status("⚠️ WAITING FOR CHROME (PORT 9222)...")
                 log("Chrome is not listening on port 9222. Auto-launching Google Chrome...", "INFO")
-                auto_launch_chrome()
+                # Run auto_launch_chrome in background executor so Tkinter UI does not freeze
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, auto_launch_chrome)
 
             if is_port_open("127.0.0.1", 9222):
                 self.ctrl.status("🔄 CONNECTING TO CHROME CDP...")
@@ -535,7 +603,10 @@ class AutoDialer:
         self.lsq = None
         self.mcube = None
 
-        # Prioritize exact Manage Opportunities tab
+        if not self.browser or not self.browser.contexts:
+            return
+
+        # Prioritize exact Manage Opportunities tab and MCUBE Soft Phone
         for ctx in self.browser.contexts:
             for p in ctx.pages:
                 if p.is_closed():
@@ -547,7 +618,7 @@ class AutoDialer:
                     self.mcube = p
                     log(f"Found MCUBE Phone tab: {p.url[:60]}", "OK")
 
-                # LeadSquared Manage Grid
+                # LeadSquared Manage Grid or Identity login
                 if "opportunitymanagement?ec=12000" in url and not self.lsq:
                     self.lsq = p
                     log(f"Found LeadSquared Grid: {p.url[:60]}", "OK")
@@ -559,17 +630,23 @@ class AutoDialer:
                     if p.is_closed():
                         continue
                     url = p.url.lower()
-                    if "opportunitymanagement" in url and "error" not in url:
+                    if ("opportunitymanagement" in url or "leadsquared.com" in url) and "error" not in url:
                         self.lsq = p
                         log(f"Found LeadSquared page: {p.url[:60]}", "OK")
                         break
 
-        # Fallback: create page if completely absent
+        # Fallback: create LeadSquared page if completely absent
+        ctx = self.browser.contexts[0]
         if not self.lsq:
-            log(f"Opening LeadSquared grid: {LSQ_MANAGE_URL}", "INFO")
-            ctx = self.browser.contexts[0] if self.browser.contexts else await self.browser.new_context()
+            log(f"Opening LeadSquared tab: {LSQ_MANAGE_URL}", "INFO")
             self.lsq = await ctx.new_page()
             await self.lsq.goto(LSQ_MANAGE_URL)
+
+        # Fallback: create MCUBE page if completely absent
+        if not self.mcube:
+            log("Opening MCUBE Dialer tab: https://dialer.mcube.com/index.html", "INFO")
+            self.mcube = await ctx.new_page()
+            await self.mcube.goto("https://dialer.mcube.com/index.html")
 
         # Attach auto-dialog accepter for native alerts/confirms
         if self.lsq:
@@ -579,10 +656,34 @@ class AutoDialer:
                 pass
 
     async def ensure_on_grid(self):
-        """Ensure self.lsq is on the Opportunity Management grid."""
+        """Ensure self.lsq is logged in and on the Opportunity Management grid."""
         await self.find_pages()
 
-        url = self.lsq.url.lower()
+        # Check if LeadSquared requires login
+        while not self.ctrl.stopped:
+            url = self.lsq.url.lower() if self.lsq else ""
+            if "identity.leadsquared.com" in url or "login" in url:
+                self.ctrl.status("🔑 PLEASE LOG IN TO LEADSQUARED")
+                log("LeadSquared login required. Please enter credentials in Chrome...", "WARN")
+                await asyncio.sleep(2)
+                await self.find_pages()
+                continue
+            break
+
+        # Check if MCUBE requires login
+        while not self.ctrl.stopped and self.mcube and not self.mcube.is_closed():
+            try:
+                m_body = (await self.mcube.inner_text("body")).lower()
+                if "login" in m_body or "sign in" in m_body:
+                    self.ctrl.status("🔑 PLEASE LOG IN TO MCUBE")
+                    log("MCUBE login required. Please enter credentials in MCUBE Soft Phone...", "WARN")
+                    await asyncio.sleep(2)
+                    continue
+            except Exception:
+                pass
+            break
+
+        url = self.lsq.url.lower() if self.lsq else ""
 
         # If currently on OpportunityDetails, use LeadSquared's native GoBackToSource()
         if "opportunitydetails" in url:
@@ -901,7 +1002,7 @@ class AutoDialer:
         return True
 
     async def monitor_call(self):
-        """Monitor MCUBE soft phone popup state."""
+        """Monitor MCUBE soft phone popup state and catch connected calls."""
         self.ctrl.status("📞 RINGING...")
         self.ctrl.customer_answered.clear()
         self.ctrl.skip_lead.clear()
@@ -934,24 +1035,39 @@ class AutoDialer:
                     body = await self.mcube.inner_text("body")
                     lower = body.lower()
 
-                    if "call in progress" in lower:
+                    # 1. CATCH CONNECTED STATE FIRST:
+                    # Detect all known MCUBE connected phrases, talking state, timer, or in-call controls
+                    connected_keywords = [
+                        "connected", "in call", "talking", "answered",
+                        "call active", "active call", "established", "call connected"
+                    ]
+                    has_connected_keyword = any(k in lower for k in connected_keywords)
+                    # Check for live duration timer (e.g. 00:01, 00:05, 01:23)
+                    has_live_timer = bool(re.search(r"\b0[0-9]:[0-5][0-9]\b|\b[1-9][0-9]*:[0-5][0-9]\b", body)) and ("00:00" not in body or has_connected_keyword)
+                    # Check for presence of active call controls
+                    has_active_controls = any(k in lower for k in ["mute", "hold"]) and any(k in lower for k in ["hangup", "end call", "disconnect"])
+
+                    if has_connected_keyword or has_live_timer or has_active_controls:
+                        log("MCUBE: Customer Connected! (Active Call Caught)", "OK")
+                        return "CONNECTED"
+
+                    # 2. Track outgoing ring / progress state
+                    if any(k in lower for k in ["call in progress", "calling", "ringing"]):
                         saw_in_progress = True
 
+                    # 3. Check for Call ended / Disconnected (only if not currently connected)
                     if "call ended" in lower or "disconnected" in lower:
                         log("MCUBE: Call ended (DNP)", "WARN")
                         return "DNP"
 
-                    if "connected" in lower or "in call" in lower:
-                        log("MCUBE: Customer Connected!", "OK")
-                        return "CONNECTED"
-
-                    if saw_in_progress and "call in progress" not in lower and elapsed > 5:
-                        log("MCUBE: Call terminated (DNP)", "WARN")
+                    # 4. If call was in progress and suddenly stopped without connecting
+                    if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 5:
+                        log("MCUBE: Call terminated without answer (DNP)", "WARN")
                         return "DNP"
                 except Exception:
                     pass
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
         log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not answer", "WARN")
         return "TIMEOUT"
@@ -986,36 +1102,26 @@ class AutoDialer:
             pass
 
     async def wait_for_disposition(self):
-        """Wait for agent to save disposition in LeadSquared."""
-        self.ctrl.status("🗣️ IN CALL - SAVE DISPOSITION")
+        """Auto-pause on connected call and wait for agent to finish, save disposition, and resume."""
+        self.ctrl.paused = True
+        self.ctrl.status("🗣️ CONNECTED — PAUSED")
         self.ctrl.disposition_done.clear()
-        log("Agent is on call. Save disposition in LeadSquared or click 'Disposition Done'...", "INFO")
+        self.ctrl.resume_event.clear()
 
-        save_detected = asyncio.Event()
+        log("=" * 65, "OK")
+        log("📞 CALL CONNECTED! Auto-paused dialer. Take your time to speak with the lead.", "OK")
+        log("👉 Lead Details page is open. Enter notes & save disposition in LeadSquared.", "INFO")
+        log("👉 When finished, click '💾 Disposition Done (Resume)' to continue to next lead.", "INFO")
+        log("=" * 65, "OK")
 
-        def on_response(resp):
-            try:
-                if resp.status == 200 and resp.request.method == "POST":
-                    url = resp.url.lower()
-                    if any(k in url for k in ["save", "createactivity", "updateopportunity", "postactivity", "processform"]):
-                        if not any(k in url for k in ["track", "ping", "notification", "keepalive", "log", "analytics"]):
-                            log(f"Disposition save detected: {resp.url[:80]}", "OK")
-                            save_detected.set()
-            except Exception:
-                pass
+        while not self.ctrl.disposition_done.is_set() and not self.ctrl.stopped:
+            # If user unpaused via the Pause button, resume as well
+            if not self.ctrl.paused:
+                break
+            await asyncio.sleep(0.4)
 
-        self.lsq.on("response", on_response)
-
-        try:
-            while not save_detected.is_set() and not self.ctrl.disposition_done.is_set() and not self.ctrl.stopped:
-                await asyncio.sleep(0.5)
-        finally:
-            try:
-                self.lsq.remove_listener("response", on_response)
-            except Exception:
-                pass
-
-        log("Disposition complete! Preparing next call...", "OK")
+        self.ctrl.paused = False
+        log("Call disposition recorded / Resume confirmed! Returning to grid for next lead...", "OK")
         await asyncio.sleep(DELAY_AFTER_CONNECTED)
 
     async def get_current_grid_page(self) -> int:
