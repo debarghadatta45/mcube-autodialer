@@ -1002,8 +1002,13 @@ class AutoDialer:
         return True
 
     async def monitor_call(self):
-        """Monitor MCUBE soft phone popup state and catch connected calls."""
-        self.ctrl.status("📞 RINGING...")
+        """
+        Monitor MCUBE soft phone state.
+        IMPORTANT: Leg-A (Agent's incoming call acceptance) is NOT considered connected.
+        Only when the customer actually picks up (or agent clicks 'Customer Answered')
+        does it count as CONNECTED and trigger auto-pause.
+        """
+        self.ctrl.status("📞 RINGING CUSTOMER...")
         self.ctrl.customer_answered.clear()
         self.ctrl.skip_lead.clear()
 
@@ -1015,61 +1020,58 @@ class AutoDialer:
         while time.time() - start < RING_TIMEOUT:
             elapsed = int(time.time() - start)
             remaining = int(RING_TIMEOUT - elapsed)
-            self.ctrl.status(f"📞 RINGING... ({remaining}s)")
+            self.ctrl.status(f"📞 RINGING CUSTOMER... ({remaining}s)")
 
-            # Auto-click any remaining or late alert popups
+            # Auto-click any remaining alert dialogs
             await self.dismiss_alerts()
 
-            # Check manual override in mini-controller
+            # 1. Check manual override from MiniController (Agent clicks when customer says Hello)
             if self.ctrl.customer_answered.is_set():
-                log("Manual Override: Customer Answered!", "OK")
+                log("Customer Answer confirmed via Controller!", "OK")
                 return "CONNECTED"
 
             if self.ctrl.skip_lead.is_set():
                 log("Manual Skip clicked", "WARN")
                 return "SKIPPED"
 
-            # Check MCUBE popup status
+            # 2. Check MCUBE popup status
             if self.mcube and not self.mcube.is_closed():
                 try:
                     body = await self.mcube.inner_text("body")
                     lower = body.lower()
 
-                    # 1. CATCH CONNECTED STATE FIRST:
-                    # Detect all known MCUBE connected phrases, talking state, timer, or in-call controls
-                    connected_keywords = [
-                        "connected", "in call", "talking", "answered",
-                        "call active", "active call", "established", "call connected"
-                    ]
-                    has_connected_keyword = any(k in lower for k in connected_keywords)
-                    # Check for live duration timer (e.g. 00:01, 00:05, 01:23)
-                    has_live_timer = bool(re.search(r"\b0[0-9]:[0-5][0-9]\b|\b[1-9][0-9]*:[0-5][0-9]\b", body)) and ("00:00" not in body or has_connected_keyword)
-                    # Check for presence of active call controls
-                    has_active_controls = any(k in lower for k in ["mute", "hold"]) and any(k in lower for k in ["hangup", "end call", "disconnect"])
-
-                    if has_connected_keyword or has_live_timer or has_active_controls:
-                        log("MCUBE: Customer Connected! (Active Call Caught)", "OK")
-                        return "CONNECTED"
-
-                    # 2. Track outgoing ring / progress state
+                    # Track ringing state
                     if any(k in lower for k in ["call in progress", "calling", "ringing"]):
                         saw_in_progress = True
 
-                    # 3. Check for Call ended / Disconnected (only if not currently connected)
+                    # EXPLICIT customer pickup keywords only (excludes agent incoming leg acceptance)
+                    customer_answered_signals = [
+                        "customer answered",
+                        "customer connected",
+                        "answered by customer",
+                        "talking with lead",
+                        "call bridged"
+                    ]
+                    if any(sig in lower for sig in customer_answered_signals):
+                        log("MCUBE: Customer actually picked up the phone!", "OK")
+                        return "CONNECTED"
+
+                    # Check for Call ended / Disconnected
                     if "call ended" in lower or "disconnected" in lower:
-                        log("MCUBE: Call ended (DNP)", "WARN")
+                        log("MCUBE: Call ended without customer answer (DNP)", "WARN")
                         return "DNP"
 
-                    # 4. If call was in progress and suddenly stopped without connecting
-                    if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 5:
-                        log("MCUBE: Call terminated without answer (DNP)", "WARN")
+                    # If ringing stopped after at least 6s without customer pickup
+                    if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 6:
+                        log("MCUBE: Outgoing ring stopped (DNP)", "WARN")
                         return "DNP"
+
                 except Exception:
                     pass
 
             await asyncio.sleep(0.3)
 
-        log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not answer", "WARN")
+        log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not pick up", "WARN")
         return "TIMEOUT"
 
     async def return_to_grid(self):
@@ -1102,26 +1104,55 @@ class AutoDialer:
             pass
 
     async def wait_for_disposition(self):
-        """Auto-pause on connected call and wait for agent to finish, save disposition, and resume."""
+        """
+        Auto-pause on connected call and wait until disposition is sent or agent resumes.
+        Will NOT proceed until agent finishes speaking and disposition is saved.
+        """
         self.ctrl.paused = True
-        self.ctrl.status("🗣️ CONNECTED — PAUSED")
+        self.ctrl.status("🗣️ CALL CONNECTED — AUTO-PAUSED")
         self.ctrl.disposition_done.clear()
         self.ctrl.resume_event.clear()
 
         log("=" * 65, "OK")
-        log("📞 CALL CONNECTED! Auto-paused dialer. Take your time to speak with the lead.", "OK")
-        log("👉 Lead Details page is open. Enter notes & save disposition in LeadSquared.", "INFO")
-        log("👉 When finished, click '💾 Disposition Done (Resume)' to continue to next lead.", "INFO")
+        log("📞 CUSTOMER CONNECTED — DIALER AUTO-PAUSED", "OK")
+        log("👉 Lead Details open. Speak with customer and save disposition in LeadSquared.", "INFO")
+        log("👉 Auto-dialer will remain PAUSED until disposition is saved or 'Disposition Done' is clicked.", "INFO")
         log("=" * 65, "OK")
 
-        while not self.ctrl.disposition_done.is_set() and not self.ctrl.stopped:
-            # If user unpaused via the Pause button, resume as well
-            if not self.ctrl.paused:
-                break
-            await asyncio.sleep(0.4)
+        disposition_saved = asyncio.Event()
+
+        def on_lsq_response(resp):
+            try:
+                if resp.status in (200, 201) and resp.request.method == "POST":
+                    url = resp.url.lower()
+                    if any(k in url for k in ["save", "createactivity", "updateopportunity", "postactivity", "processform", "customaction"]):
+                        if not any(k in url for k in ["track", "ping", "notification", "keepalive", "log", "analytics", "presence"]):
+                            log(f"LeadSquared disposition save detected: {resp.url[:70]}", "OK")
+                            disposition_saved.set()
+            except Exception:
+                pass
+
+        if self.lsq:
+            try:
+                self.lsq.on("response", on_lsq_response)
+            except Exception:
+                pass
+
+        try:
+            # Stay paused until disposition POST is caught OR user clicks "Disposition Done"
+            while not self.ctrl.disposition_done.is_set() and not disposition_saved.is_set() and not self.ctrl.stopped:
+                if not self.ctrl.paused:
+                    break
+                await asyncio.sleep(0.4)
+        finally:
+            if self.lsq:
+                try:
+                    self.lsq.remove_listener("response", on_lsq_response)
+                except Exception:
+                    pass
 
         self.ctrl.paused = False
-        log("Call disposition recorded / Resume confirmed! Returning to grid for next lead...", "OK")
+        log("✅ Disposition saved! Returning to grid for next lead...", "OK")
         await asyncio.sleep(DELAY_AFTER_CONNECTED)
 
     async def get_current_grid_page(self) -> int:
