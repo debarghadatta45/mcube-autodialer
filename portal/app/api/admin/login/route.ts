@@ -6,8 +6,8 @@ export async function POST(req: Request) {
     const body = await req.json();
     const { email, password } = body;
 
-    const targetEmail = (process.env.ADMIN_EMAIL || "debargha.datta@vedantu.com").toLowerCase().trim();
-    const targetPassword = process.env.ADMIN_PASSWORD || "Mon#0812";
+    const targetEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
+    const targetPassword = process.env.ADMIN_PASSWORD || "";
 
     const inputEmail = (email || "").toLowerCase().trim();
     const inputPassword = password || "";

@@ -1,6 +1,10 @@
 import { MongoClient } from "mongodb";
 
-const uri = process.env.MONGODB_URI || "mongodb+srv://mcube:qQgoG72TrTTD99ZF@cluster0.7csi1ox.mongodb.net/vedantu_autodialer?retryWrites=true&w=majority";
+const uri = process.env.MONGODB_URI;
+
+if (!uri) {
+  throw new Error("Invalid or missing environment variable: 'MONGODB_URI'");
+}
 const options = {};
 
 let client: MongoClient;
