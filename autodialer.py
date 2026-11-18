@@ -554,6 +554,7 @@ class AutoDialer:
         self.browser: Optional[Browser] = None
         self.lsq: Optional[Page] = None
         self.mcube: Optional[Page] = None
+        self.mcube_pages: list[Page] = []
         self.ctrl: Optional[MiniController] = None
         self.pw = None
         self.dialed = 0
@@ -602,6 +603,7 @@ class AutoDialer:
         """Dynamically detect or refresh LeadSquared and MCUBE pages."""
         self.lsq = None
         self.mcube = None
+        self.mcube_pages = []
 
         if not self.browser or not self.browser.contexts:
             return
@@ -613,10 +615,12 @@ class AutoDialer:
                     continue
                 url = p.url.lower()
 
-                # MCUBE Soft Phone popup
-                if "dialer.mcube.com" in url and not self.mcube:
-                    self.mcube = p
-                    log(f"Found MCUBE Phone tab: {p.url[:60]}", "OK")
+                # Track ALL MCUBE pages (both Soft Phone and Portal / Dashboard)
+                if "mcube" in url:
+                    self.mcube_pages.append(p)
+                    if "dialer.mcube.com" in url and not self.mcube:
+                        self.mcube = p
+                        log(f"Found MCUBE Phone tab: {p.url[:60]}", "OK")
 
                 # LeadSquared Manage Grid or Identity login
                 if "opportunitymanagement?ec=12000" in url and not self.lsq:
@@ -635,6 +639,11 @@ class AutoDialer:
                         log(f"Found LeadSquared page: {p.url[:60]}", "OK")
                         break
 
+        # Fallback for MCUBE if dialer.mcube.com not explicitly matched yet
+        if not self.mcube and self.mcube_pages:
+            self.mcube = self.mcube_pages[0]
+            log(f"Using primary MCUBE tab: {self.mcube.url[:60]}", "OK")
+
         # Fallback: create LeadSquared page if completely absent
         ctx = self.browser.contexts[0]
         if not self.lsq:
@@ -647,6 +656,7 @@ class AutoDialer:
             log("Opening MCUBE Dialer tab: https://dialer.mcube.com/index.html", "INFO")
             self.mcube = await ctx.new_page()
             await self.mcube.goto("https://dialer.mcube.com/index.html")
+            self.mcube_pages.append(self.mcube)
 
         # Attach auto-dialog accepter for native alerts/confirms
         if self.lsq:
@@ -1001,11 +1011,114 @@ class AutoDialer:
 
         return True
 
+    async def check_call_status_answer(self) -> bool:
+        """
+        Check across all MCUBE browser tabs, SIP.js session states, and DOM elements
+        to detect if Call Status is 'ANSWER' (Customer answered).
+        """
+        # 1. Check MiniController manual confirmation
+        if self.ctrl and self.ctrl.customer_answered.is_set():
+            log("Customer answer confirmed via Controller button!", "OK")
+            return True
+
+        # 2. Check SIP.js UserAgent session state on dialer.mcube.com
+        if self.mcube and not self.mcube.is_closed():
+            try:
+                sip_status = await self.mcube.evaluate("""() => {
+                    try {
+                        // Check UserAgent SIP sessions
+                        if (typeof userAgent !== 'undefined' && userAgent && userAgent.sessions) {
+                            for (let id in userAgent.sessions) {
+                                let s = userAgent.sessions[id];
+                                if (s) {
+                                    let st = s.state || s._state;
+                                    // SIP.SessionState.Established == 3 or 'Established'
+                                    if (st === 'Established' || st === 3 || (typeof SIP !== 'undefined' && st === SIP.SessionState.Established)) {
+                                        return 'ANSWER';
+                                    }
+                                }
+                            }
+                        }
+                        // Check Lines array
+                        if (typeof Lines !== 'undefined' && Array.isArray(Lines)) {
+                            for (let l of Lines) {
+                                if (l && l.SipSession) {
+                                    let st = l.SipSession.state;
+                                    if (st === 'Established' || (typeof SIP !== 'undefined' && st === SIP.SessionState.Established)) {
+                                        return 'ANSWER';
+                                    }
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                    return null;
+                }""")
+                if sip_status == "ANSWER":
+                    log("MCUBE Softphone: Call session Established (ANSWER) via WebRTC/SIP.js!", "OK")
+                    return True
+            except Exception:
+                pass
+
+        # 3. Check DOM elements & badges across all MCUBE pages (including vedantu.mcube.com)
+        for p in self.mcube_pages:
+            if p.is_closed():
+                continue
+            try:
+                dom_res = await p.evaluate("""() => {
+                    try {
+                        // Look for elements with text ANSWER or green badge
+                        let els = Array.from(document.querySelectorAll('button, span, td, div, p, a, [class*="badge"], [class*="btn"], [class*="status"]'));
+                        for (let el of els) {
+                            let txt = (el.innerText || '').trim();
+                            if (txt === 'ANSWER' || txt === 'Answered') {
+                                return 'ANSWER';
+                            }
+                        }
+                        let body = document.body ? document.body.innerText : '';
+                        if (/call\\s*status[\\s:]*answer/i.test(body) || /status[\\s:]*answer/i.test(body)) {
+                            return 'ANSWER';
+                        }
+                    } catch(e) {}
+                    return null;
+                }""")
+                if dom_res == "ANSWER":
+                    log(f"MCUBE Page ({p.url[:45]}): Call Status 'ANSWER' detected in DOM!", "OK")
+                    return True
+            except Exception:
+                pass
+
+        # 4. Check main MCUBE page inner_text
+        if self.mcube and not self.mcube.is_closed():
+            try:
+                body = await self.mcube.inner_text("body")
+                lower = body.lower()
+                if re.search(r'\bcall\s*status[\s:]*answer\b', lower) or re.search(r'\bstatus[\s:]*answer\b', lower):
+                    log("MCUBE: Call Status ANSWER matched via text regex!", "OK")
+                    return True
+                customer_answered_signals = [
+                    "customer answered",
+                    "customer connected",
+                    "answered by customer",
+                    "talking with lead",
+                    "call bridged",
+                    "they answered",
+                    "call answered",
+                    "call status answer",
+                    "call status: answer",
+                ]
+                if any(sig in lower for sig in customer_answered_signals):
+                    log("MCUBE: Customer answer signal detected!", "OK")
+                    return True
+            except Exception:
+                pass
+
+        return False
+
     async def monitor_call(self):
         """
         Monitor MCUBE soft phone state.
         IMPORTANT: Leg-A (Agent's incoming call acceptance) is NOT considered connected.
-        Only when the customer actually picks up (or agent clicks 'Customer Answered')
+        Only when the customer actually picks up (Call Status: ANSWER or agent clicks 'Customer Answered')
         does it count as CONNECTED and trigger auto-pause.
         """
         self.ctrl.status("📞 RINGING CUSTOMER...")
@@ -1034,7 +1147,12 @@ class AutoDialer:
                 log("Manual Skip clicked", "WARN")
                 return "SKIPPED"
 
-            # 2. Check MCUBE popup status
+            # 2. Check Call Status ANSWER across all MCUBE pages & SIP sessions
+            if await self.check_call_status_answer():
+                log("📞 CALL STATUS: ANSWER DETECTED — CUSTOMER CONNECTED!", "OK")
+                return "CONNECTED"
+
+            # 3. Check MCUBE popup status for ringing vs disconnect
             if self.mcube and not self.mcube.is_closed():
                 try:
                     body = await self.mcube.inner_text("body")
@@ -1044,25 +1162,22 @@ class AutoDialer:
                     if any(k in lower for k in ["call in progress", "calling", "ringing"]):
                         saw_in_progress = True
 
-                    # EXPLICIT customer pickup keywords only (excludes agent incoming leg acceptance)
-                    customer_answered_signals = [
-                        "customer answered",
-                        "customer connected",
-                        "answered by customer",
-                        "talking with lead",
-                        "call bridged"
-                    ]
-                    if any(sig in lower for sig in customer_answered_signals):
-                        log("MCUBE: Customer actually picked up the phone!", "OK")
-                        return "CONNECTED"
-
                     # Check for Call ended / Disconnected
                     if "call ended" in lower or "disconnected" in lower:
+                        # Double-check if call was actually answered before declaring DNP
+                        if await self.check_call_status_answer():
+                            log("MCUBE: Call Status ANSWER detected on disconnect check!", "OK")
+                            return "CONNECTED"
                         log("MCUBE: Call ended without customer answer (DNP)", "WARN")
                         return "DNP"
 
                     # If ringing stopped after at least 6s without customer pickup
                     if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 6:
+                        # Ensure ringing didn't stop because the customer answered!
+                        await asyncio.sleep(0.8)
+                        if await self.check_call_status_answer():
+                            log("MCUBE: Call Status ANSWER detected after ring stopped!", "OK")
+                            return "CONNECTED"
                         log("MCUBE: Outgoing ring stopped (DNP)", "WARN")
                         return "DNP"
 
@@ -1070,6 +1185,11 @@ class AutoDialer:
                     pass
 
             await asyncio.sleep(0.3)
+
+        # Final check on timeout
+        if await self.check_call_status_answer():
+            log("MCUBE: Call Status ANSWER detected at timeout boundary!", "OK")
+            return "CONNECTED"
 
         log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not pick up", "WARN")
         return "TIMEOUT"
@@ -1487,10 +1607,14 @@ class AutoDialer:
 
                 # 6. Handle Call Result
                 if result == "CONNECTED":
-                    log(f"CALL CONNECTED: {lead['name']}", "OK")
+                    log("=" * 65, "OK")
+                    log(f"📞 CALL STATUS: ANSWER — AUTO-PAUSED ON LEAD: {lead['name']}", "OK")
+                    log("👉 Auto-dialer paused. Talk to lead and save disposition in LeadSquared.", "INFO")
+                    log("=" * 65, "OK")
                     self.connected += 1
                     self.ctrl.stats(self.dialed, self.connected, self.dnp)
                     play_connected_chime()
+                    # Auto-pause dialer from advancing to the next lead and calling
                     await self.wait_for_disposition()
                     await self.return_to_grid()
 
