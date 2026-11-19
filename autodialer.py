@@ -1095,93 +1095,259 @@ class AutoDialer:
 
         return None
 
+    async def start_human_voice_detector(self):
+        """
+        Inject live Voice Activity & Human Greeting ('Hello') Detection into dialer.mcube.com:
+        - Taps into remote WebRTC audio stream via Web Audio API.
+        - Analyzes audio cadence:
+            * Real Human Greeting ('Hello?'): 0.35s - 1.6s speech burst followed by >= 0.55s conversational silence.
+            * Caller Tune / Music: Continuous sound > 2.8s without speech pause (DOES NOT PAUSE, waits for human).
+            * Voicemail / Carrier Announcement: Monologue > 5.5s (skips as DNP).
+        """
+        if not self.mcube or self.mcube.is_closed():
+            return
+        try:
+            await self.mcube.evaluate("""() => {
+                window.__mcube_audio_running = true;
+                window.__mcube_audio_result = null;
+
+                try {
+                    let activeStream = null;
+                    // 1. Get remote stream from active SIP.js session peer connection
+                    if (typeof userAgent !== 'undefined' && userAgent && userAgent.sessions) {
+                        for (let id in userAgent.sessions) {
+                            let s = userAgent.sessions[id];
+                            if (s && s.sessionDescriptionHandler && s.sessionDescriptionHandler.peerConnection) {
+                                let pc = s.sessionDescriptionHandler.peerConnection;
+                                let stream = new MediaStream();
+                                pc.getReceivers().forEach(r => {
+                                    if (r.track && r.track.kind === 'audio') {
+                                        stream.addTrack(r.track);
+                                    }
+                                });
+                                if (stream.getAudioTracks().length > 0) {
+                                    activeStream = stream;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Fallback: check all <audio> elements in page
+                    if (!activeStream) {
+                        let audios = Array.from(document.querySelectorAll('audio')).filter(a => a.srcObject && a.srcObject.getAudioTracks().length > 0);
+                        if (audios.length > 0) {
+                            activeStream = audios[0].srcObject;
+                        }
+                    }
+
+                    if (!activeStream) {
+                        return;
+                    }
+
+                    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                    if (!AudioCtx) return;
+                    const ctx = new AudioCtx();
+                    const source = ctx.createMediaStreamSource(activeStream);
+                    const analyser = ctx.createAnalyser();
+                    analyser.fftSize = 512;
+                    source.connect(analyser);
+
+                    const buffer = new Float32Array(analyser.fftSize);
+                    let speechStart = 0;
+                    let silenceStart = 0;
+                    let lastSpeechDuration = 0;
+                    let isSpeaking = false;
+                    let continuousSoundStart = 0;
+
+                    const timer = setInterval(() => {
+                        if (!window.__mcube_audio_running) {
+                            clearInterval(timer);
+                            try { ctx.close(); } catch(e) {}
+                            return;
+                        }
+
+                        analyser.getFloatTimeDomainData(buffer);
+                        let sumSq = 0;
+                        for (let i = 0; i < buffer.length; i++) {
+                            sumSq += buffer[i] * buffer[i];
+                        }
+                        let rms = Math.sqrt(sumSq / buffer.length);
+                        let now = Date.now();
+
+                        // Sound active if rms >= 0.016
+                        const THRESHOLD = 0.016;
+
+                        if (rms >= THRESHOLD) {
+                            if (!continuousSoundStart) continuousSoundStart = now;
+                            let soundDuration = (now - continuousSoundStart) / 1000;
+
+                            if (!isSpeaking) {
+                                isSpeaking = true;
+                                speechStart = now;
+                            }
+                            silenceStart = 0;
+
+                            // Machine / carrier announcement talks non-stop > 5.5s
+                            if (soundDuration > 5.5) {
+                                window.__mcube_audio_result = "VOICEMAIL";
+                                clearInterval(timer);
+                            }
+                        } else {
+                            // Silence / pause
+                            continuousSoundStart = 0;
+
+                            if (isSpeaking) {
+                                isSpeaking = false;
+                                lastSpeechDuration = (now - speechStart) / 1000;
+                                silenceStart = now;
+                            }
+
+                            if (silenceStart > 0) {
+                                let silenceDuration = (now - silenceStart) / 1000;
+                                // Human greeting signature:
+                                // Short utterance (0.35s to 1.6s) followed by conversational silence (>= 0.55s)
+                                if (lastSpeechDuration >= 0.35 && lastSpeechDuration <= 1.6 && silenceDuration >= 0.55) {
+                                    window.__mcube_audio_result = "HUMAN_ANSWERED";
+                                    clearInterval(timer);
+                                }
+                            }
+                        }
+                    }, 80);
+                } catch(e) {
+                    console.warn("Audio detector initialization error:", e);
+                }
+            }""")
+        except Exception:
+            pass
+
+    async def poll_voice_detection(self) -> Optional[str]:
+        """Check status of injected Voice & Greeting Detector."""
+        if not self.mcube or self.mcube.is_closed():
+            return None
+        try:
+            res = await self.mcube.evaluate("() => window.__mcube_audio_result || null")
+            return res
+        except Exception:
+            return None
+
+    async def stop_human_voice_detector(self):
+        """Cleanup AudioContext when call ends."""
+        if not self.mcube or self.mcube.is_closed():
+            return
+        try:
+            await self.mcube.evaluate("() => { window.__mcube_audio_running = false; window.__mcube_audio_result = null; }")
+        except Exception:
+            pass
+
     async def monitor_call(self):
         """
-        Monitor MCUBE soft phone state.
-        IMPORTANT: Leg-A (Agent's incoming call acceptance) is NOT considered connected.
-        Only when the customer actually picks up (Call Status: ANSWER or agent clicks 'Customer Answered')
-        does it count as CONNECTED and trigger auto-pause.
-        If the customer is BUSY or rejects, it marks DNP and does NOT auto-pause.
+        Monitor MCUBE soft phone state with Human Voice Greeting Detection ('Hello')
+        and Caller Tune / Voicemail filtering:
+        1. Listens to remote audio stream:
+           - Detects real human saying 'Hello?' / 'Haanji?' (0.35s - 1.6s utterance + pause) -> AUTO-PAUSES!
+           - Ignores Caller Tunes (continuous music/songs) -> keeps waiting for human.
+           - Skips Voicemail / Carrier IVR announcements -> marks DNP.
+        2. Checks Asterisk Confbridge channels (length >= 2 = customer joined).
+        3. Checks Live MCUBE Call Log Row 0 (ANSWER vs BUSY).
+        4. MiniController manual button ('Customer Answered') for 1-click override.
         """
         self.ctrl.status("📞 RINGING CUSTOMER...")
         self.ctrl.customer_answered.clear()
         self.ctrl.skip_lead.clear()
 
         await self.find_pages()
+        await self.start_human_voice_detector()
 
         start = time.time()
         saw_in_progress = False
 
-        while time.time() - start < RING_TIMEOUT:
-            elapsed = int(time.time() - start)
-            remaining = int(RING_TIMEOUT - elapsed)
-            self.ctrl.status(f"📞 RINGING CUSTOMER... ({remaining}s)")
+        try:
+            while time.time() - start < RING_TIMEOUT:
+                elapsed = int(time.time() - start)
+                remaining = int(RING_TIMEOUT - elapsed)
+                self.ctrl.status(f"📞 RINGING CUSTOMER... ({remaining}s)")
 
-            # Auto-click any remaining alert dialogs
-            await self.dismiss_alerts()
+                # Auto-click any remaining alert dialogs
+                await self.dismiss_alerts()
 
-            # 1. Check manual override from MiniController (Agent clicks when customer says Hello)
-            if self.ctrl.customer_answered.is_set():
-                log("Customer Answer confirmed via Controller!", "OK")
+                # 1. Manual override from MiniController
+                if self.ctrl.customer_answered.is_set():
+                    log("Customer Answer confirmed via Controller!", "OK")
+                    return "CONNECTED"
+
+                if self.ctrl.skip_lead.is_set():
+                    log("Manual Skip clicked", "WARN")
+                    return "SKIPPED"
+
+                # 2. Human Voice & Greeting Detection ('Hello' pattern)
+                voice_res = await self.poll_voice_detection()
+                if voice_res == "HUMAN_ANSWERED":
+                    log("🗣️ HUMAN VOICE GREETING DETECTED ('Hello' pattern confirmed) — AUTO-PAUSED!", "OK")
+                    return "CONNECTED"
+                elif voice_res == "VOICEMAIL":
+                    log("🤖 CARRIER IVR / VOICEMAIL DETECTED (Continuous speech) — SKIPPING LEAD (DNP)", "WARN")
+                    return "DNP"
+
+                # 3. Check MCUBE call status (Asterisk Confbridge & Row 0)
+                status = await self.check_call_status()
+                if status == "ANSWER":
+                    log("📞 CALL STATUS: ANSWER CONFIRMED — CUSTOMER CONNECTED!", "OK")
+                    return "CONNECTED"
+                elif status == "BUSY":
+                    log("MCUBE: Customer is BUSY (confirmed via call status) — moving to next lead", "WARN")
+                    return "DNP"
+
+                # 4. Check MCUBE popup status for ringing vs disconnect
+                if self.mcube and not self.mcube.is_closed():
+                    try:
+                        body = await self.mcube.inner_text("body")
+                        lower = body.lower()
+
+                        if any(k in lower for k in ["call in progress", "calling", "ringing"]):
+                            saw_in_progress = True
+
+                        # Check for Call ended / Disconnected
+                        if "call ended" in lower or "disconnected" in lower:
+                            await asyncio.sleep(0.5)
+                            voice_final = await self.poll_voice_detection()
+                            if voice_final == "HUMAN_ANSWERED":
+                                return "CONNECTED"
+                            status_final = await self.check_call_status()
+                            if status_final == "ANSWER":
+                                return "CONNECTED"
+                            log("MCUBE: Call ended without customer answer (DNP/BUSY)", "WARN")
+                            return "DNP"
+
+                        # If ringing stopped after at least 6s without customer pickup
+                        if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 6:
+                            await asyncio.sleep(0.8)
+                            voice_final = await self.poll_voice_detection()
+                            if voice_final == "HUMAN_ANSWERED":
+                                return "CONNECTED"
+                            status_final = await self.check_call_status()
+                            if status_final == "ANSWER":
+                                return "CONNECTED"
+                            log("MCUBE: Outgoing ring stopped (DNP/BUSY)", "WARN")
+                            return "DNP"
+
+                    except Exception:
+                        pass
+
+                await asyncio.sleep(0.25)
+
+            # Final check on timeout
+            voice_final = await self.poll_voice_detection()
+            if voice_final == "HUMAN_ANSWERED":
+                return "CONNECTED"
+            status_final = await self.check_call_status()
+            if status_final == "ANSWER":
                 return "CONNECTED"
 
-            if self.ctrl.skip_lead.is_set():
-                log("Manual Skip clicked", "WARN")
-                return "SKIPPED"
-
-            # 2. Check MCUBE call status
-            status = await self.check_call_status()
-            if status == "ANSWER":
-                log("📞 CALL STATUS: ANSWER CONFIRMED — CUSTOMER CONNECTED!", "OK")
-                return "CONNECTED"
-            elif status == "BUSY":
-                log("MCUBE: Customer is BUSY (confirmed via call status) — moving to next lead", "WARN")
-                return "DNP"
-
-            # 3. Check MCUBE popup status for ringing vs disconnect
-            if self.mcube and not self.mcube.is_closed():
-                try:
-                    body = await self.mcube.inner_text("body")
-                    lower = body.lower()
-
-                    # Track ringing state
-                    if any(k in lower for k in ["call in progress", "calling", "ringing"]):
-                        saw_in_progress = True
-
-                    # Check for Call ended / Disconnected
-                    if "call ended" in lower or "disconnected" in lower:
-                        # Before declaring DNP, wait 0.5s and check if status became ANSWER or BUSY
-                        await asyncio.sleep(0.5)
-                        final_st = await self.check_call_status()
-                        if final_st == "ANSWER":
-                            log("MCUBE: Call Status ANSWER detected on disconnect check!", "OK")
-                            return "CONNECTED"
-                        log("MCUBE: Call ended without customer answer (DNP/BUSY)", "WARN")
-                        return "DNP"
-
-                    # If ringing stopped after at least 6s without customer pickup
-                    if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 6:
-                        await asyncio.sleep(0.8)
-                        final_st = await self.check_call_status()
-                        if final_st == "ANSWER":
-                            log("MCUBE: Call Status ANSWER detected after ring stopped!", "OK")
-                            return "CONNECTED"
-                        log("MCUBE: Outgoing ring stopped (DNP/BUSY)", "WARN")
-                        return "DNP"
-
-                except Exception:
-                    pass
-
-            await asyncio.sleep(0.3)
-
-        # Final check on timeout
-        final_st = await self.check_call_status()
-        if final_st == "ANSWER":
-            log("MCUBE: Call Status ANSWER detected at timeout boundary!", "OK")
-            return "CONNECTED"
-
-        log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not pick up", "WARN")
-        return "TIMEOUT"
+            log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not pick up", "WARN")
+            return "TIMEOUT"
+        finally:
+            await self.stop_human_voice_detector()
 
     async def return_to_grid(self):
         """
