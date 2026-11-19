@@ -554,6 +554,7 @@ class AutoDialer:
         self.browser: Optional[Browser] = None
         self.lsq: Optional[Page] = None
         self.mcube: Optional[Page] = None
+        self.mcube_portal: Optional[Page] = None
         self.mcube_pages: list[Page] = []
         self.ctrl: Optional[MiniController] = None
         self.pw = None
@@ -604,6 +605,7 @@ class AutoDialer:
         """Dynamically detect or refresh LeadSquared and MCUBE pages."""
         self.lsq = None
         self.mcube = None
+        self.mcube_portal = None
         self.mcube_pages = []
 
         if not self.browser or not self.browser.contexts:
@@ -622,6 +624,9 @@ class AutoDialer:
                     if "dialer.mcube.com" in url and not self.mcube:
                         self.mcube = p
                         log(f"Found MCUBE Phone tab: {p.url[:60]}", "OK")
+                    if "vedantu.mcube.com" in url and not self.mcube_portal:
+                        self.mcube_portal = p
+                        log(f"Found MCUBE Portal tab: {p.url[:60]}", "OK")
 
                 # LeadSquared Manage Grid or Identity login
                 if "opportunitymanagement?ec=12000" in url and not self.lsq:
@@ -1015,20 +1020,73 @@ class AutoDialer:
 
     async def check_call_status(self) -> Optional[str]:
         """
-        Check across MCUBE Asterisk Confbridge and the current call log row:
+        Check across MCUBE Landing Page (https://vedantu.mcube.com/#/Home/landingpage),
+        Asterisk Confbridge channels, and the live call log table:
         Returns:
-            "ANSWER" -> Customer actually answered (trigger auto-pause)
-            "BUSY"   -> Customer is busy / rejected / failed (do not pause, mark DNP)
-            None     -> Still ringing / call in progress
+            "ANSWER" -> Customer answered / connected (trigger auto-pause)
+            "BUSY"   -> Customer is busy / rejected / failed / DNP (do not pause, mark DNP)
+            None     -> Still ringing / calling in progress
         """
         # 1. MiniController manual button ('Customer Answered')
         if self.ctrl and self.ctrl.customer_answered.is_set():
             log("Customer answer confirmed via Controller button!", "OK")
             return "ANSWER"
 
-        # 2. Check Asterisk Confbridge channels on dialer.mcube.com
-        # IMPORTANT: Leg-A (agent's WebRTC session) has ConfbridgeChannels.length == 1.
-        # ONLY when the customer (Leg-B) answers and is bridged does length become >= 2!
+        # 2. Check MCUBE Landing Page (https://vedantu.mcube.com/#/Home/landingpage)
+        # Analyzes live .call-notification widget ('On Call', 'Calling', 'DNP', etc.)
+        # and non-DNP Disposition Form popup.
+        for p in self.mcube_pages:
+            if p.is_closed() or "vedantu.mcube.com" not in p.url.lower():
+                continue
+            try:
+                portal_state = await p.evaluate("""() => {
+                    try {
+                        // A. Check .call-notification widget
+                        let notif = document.querySelector('.call-notification');
+                        if (notif) {
+                            let text = (notif.innerText || '').toUpperCase();
+                            let cls = (notif.className || '').toLowerCase();
+
+                            // Explicit DNP or Busy or Failed or Disconnected
+                            if (text.includes('DNP') || text.includes('BUSY') || text.includes('FAILED') || 
+                                text.includes('NO ANSWER') || text.includes('CANCEL') || text.includes('AGENT BUSY')) {
+                                return 'BUSY';
+                            }
+
+                            // Explicit Customer Answer / Connected:
+                            // MCUBE Angular template displays "On Call" when dialstatus == "ANSWER",
+                            // or adds "disposition-width" to the .call-notification class.
+                            if (text.includes('ON CALL') || text.includes('ANSWER') || cls.includes('disposition-width')) {
+                                return 'ANSWER';
+                            }
+                        }
+
+                        // B. Check MCUBE Disposition Popup / Dialog / Overlay (.cdk-overlay-pane, .disposition-width, etc.)
+                        let overlay = document.querySelector('.cdk-overlay-pane, .disposition-width, [class*="disposition-width"]');
+                        if (overlay) {
+                            let text = (overlay.innerText || '').toUpperCase();
+                            if (text.includes('DISPOSITION FORM') || text.includes('DISPOSITION')) {
+                                if (text.includes('DNP') || text.includes('BUSY') || text.includes('FAILED') || text.includes('CANCEL')) {
+                                    return 'BUSY';
+                                }
+                                // Non-DNP Disposition Form popup -> Customer picked up, call is connected!
+                                return 'ANSWER';
+                            }
+                        }
+                    } catch(e) {}
+                    return null;
+                }""")
+                if portal_state == "ANSWER":
+                    log(f"MCUBE Landing Page ({p.url[:40]}): Call is CONNECTED ('On Call' / Non-DNP Disposition Form detected)!", "OK")
+                    return "ANSWER"
+                elif portal_state == "BUSY":
+                    log(f"MCUBE Landing Page ({p.url[:40]}): Call status is 'DNP' / 'BUSY'!", "WARN")
+                    return "BUSY"
+            except Exception:
+                pass
+
+        # 3. Check Asterisk Confbridge channels on dialer.mcube.com
+        # Leg-A has ConfbridgeChannels.length == 1; Leg-B (customer) joining makes length >= 2
         if self.mcube and not self.mcube.is_closed():
             try:
                 conf_state = await self.mcube.evaluate("""() => {
@@ -1038,13 +1096,9 @@ class AutoDialer:
                                 let s = userAgent.sessions[id];
                                 if (s && s.data) {
                                     let chans = s.data.ConfbridgeChannels || [];
-                                    if (chans.length >= 2) {
-                                        return 'ANSWER';
-                                    }
+                                    if (chans.length >= 2) return 'ANSWER';
                                     let events = s.data.ConfbridgeEvents || [];
-                                    if (events.length >= 2) {
-                                        return 'ANSWER';
-                                    }
+                                    if (events.length >= 2) return 'ANSWER';
                                 }
                             }
                         }
@@ -1057,8 +1111,7 @@ class AutoDialer:
             except Exception:
                 pass
 
-        # 3. Check Row 0 (most recent call) on vedantu.mcube.com
-        # Scoped strictly to the currently dialed phone tail
+        # 4. Check Row 0 (most recent call) on vedantu.mcube.com live table
         phone_tail = re.sub(r'\D', '', self.current_phone)[-4:] if self.current_phone else ""
         for p in self.mcube_pages:
             if p.is_closed() or "vedantu.mcube.com" not in p.url.lower():
@@ -1072,7 +1125,6 @@ class AutoDialer:
                         if (cells.length < 8) return null;
                         let cust = cells[1] || '';
                         let st = (cells[7] || '').toUpperCase();
-                        // If phoneTail is present, verify row 0 is for the current lead
                         if (!phoneTail || cust.includes(phoneTail)) {
                             if (st === 'ANSWER' || st === 'ANSWERED') {
                                 return 'ANSWER';
@@ -1095,160 +1147,14 @@ class AutoDialer:
 
         return None
 
-    async def start_human_voice_detector(self):
-        """
-        Inject live Voice Activity & Human Greeting ('Hello') Detection into dialer.mcube.com:
-        - Taps into remote WebRTC audio stream via Web Audio API.
-        - Analyzes audio cadence:
-            * Real Human Greeting ('Hello?'): 0.35s - 1.6s speech burst followed by >= 0.55s conversational silence.
-            * Caller Tune / Music: Continuous sound > 2.8s without speech pause (DOES NOT PAUSE, waits for human).
-            * Voicemail / Carrier Announcement: Monologue > 5.5s (skips as DNP).
-        """
-        if not self.mcube or self.mcube.is_closed():
-            return
-        try:
-            await self.mcube.evaluate("""() => {
-                window.__mcube_audio_running = true;
-                window.__mcube_audio_result = null;
-
-                try {
-                    let activeStream = null;
-                    // 1. Get remote stream from active SIP.js session peer connection
-                    if (typeof userAgent !== 'undefined' && userAgent && userAgent.sessions) {
-                        for (let id in userAgent.sessions) {
-                            let s = userAgent.sessions[id];
-                            if (s && s.sessionDescriptionHandler && s.sessionDescriptionHandler.peerConnection) {
-                                let pc = s.sessionDescriptionHandler.peerConnection;
-                                let stream = new MediaStream();
-                                pc.getReceivers().forEach(r => {
-                                    if (r.track && r.track.kind === 'audio') {
-                                        stream.addTrack(r.track);
-                                    }
-                                });
-                                if (stream.getAudioTracks().length > 0) {
-                                    activeStream = stream;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    // 2. Fallback: check all <audio> elements in page
-                    if (!activeStream) {
-                        let audios = Array.from(document.querySelectorAll('audio')).filter(a => a.srcObject && a.srcObject.getAudioTracks().length > 0);
-                        if (audios.length > 0) {
-                            activeStream = audios[0].srcObject;
-                        }
-                    }
-
-                    if (!activeStream) {
-                        return;
-                    }
-
-                    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-                    if (!AudioCtx) return;
-                    const ctx = new AudioCtx();
-                    const source = ctx.createMediaStreamSource(activeStream);
-                    const analyser = ctx.createAnalyser();
-                    analyser.fftSize = 512;
-                    source.connect(analyser);
-
-                    const buffer = new Float32Array(analyser.fftSize);
-                    let speechStart = 0;
-                    let silenceStart = 0;
-                    let lastSpeechDuration = 0;
-                    let isSpeaking = false;
-                    let continuousSoundStart = 0;
-
-                    const timer = setInterval(() => {
-                        if (!window.__mcube_audio_running) {
-                            clearInterval(timer);
-                            try { ctx.close(); } catch(e) {}
-                            return;
-                        }
-
-                        analyser.getFloatTimeDomainData(buffer);
-                        let sumSq = 0;
-                        for (let i = 0; i < buffer.length; i++) {
-                            sumSq += buffer[i] * buffer[i];
-                        }
-                        let rms = Math.sqrt(sumSq / buffer.length);
-                        let now = Date.now();
-
-                        // Sound active if rms >= 0.016
-                        const THRESHOLD = 0.016;
-
-                        if (rms >= THRESHOLD) {
-                            if (!continuousSoundStart) continuousSoundStart = now;
-                            let soundDuration = (now - continuousSoundStart) / 1000;
-
-                            if (!isSpeaking) {
-                                isSpeaking = true;
-                                speechStart = now;
-                            }
-                            silenceStart = 0;
-
-                            // Machine / carrier announcement talks non-stop > 5.5s
-                            if (soundDuration > 5.5) {
-                                window.__mcube_audio_result = "VOICEMAIL";
-                                clearInterval(timer);
-                            }
-                        } else {
-                            // Silence / pause
-                            continuousSoundStart = 0;
-
-                            if (isSpeaking) {
-                                isSpeaking = false;
-                                lastSpeechDuration = (now - speechStart) / 1000;
-                                silenceStart = now;
-                            }
-
-                            if (silenceStart > 0) {
-                                let silenceDuration = (now - silenceStart) / 1000;
-                                // Human greeting signature:
-                                // Short utterance (0.35s to 1.6s) followed by conversational silence (>= 0.55s)
-                                if (lastSpeechDuration >= 0.35 && lastSpeechDuration <= 1.6 && silenceDuration >= 0.55) {
-                                    window.__mcube_audio_result = "HUMAN_ANSWERED";
-                                    clearInterval(timer);
-                                }
-                            }
-                        }
-                    }, 80);
-                } catch(e) {
-                    console.warn("Audio detector initialization error:", e);
-                }
-            }""")
-        except Exception:
-            pass
-
-    async def poll_voice_detection(self) -> Optional[str]:
-        """Check status of injected Voice & Greeting Detector."""
-        if not self.mcube or self.mcube.is_closed():
-            return None
-        try:
-            res = await self.mcube.evaluate("() => window.__mcube_audio_result || null")
-            return res
-        except Exception:
-            return None
-
-    async def stop_human_voice_detector(self):
-        """Cleanup AudioContext when call ends."""
-        if not self.mcube or self.mcube.is_closed():
-            return
-        try:
-            await self.mcube.evaluate("() => { window.__mcube_audio_running = false; window.__mcube_audio_result = null; }")
-        except Exception:
-            pass
-
     async def monitor_call(self):
         """
-        Monitor MCUBE soft phone state with Human Voice Greeting Detection ('Hello')
-        and Caller Tune / Voicemail filtering:
-        1. Listens to remote audio stream:
-           - Detects real human saying 'Hello?' / 'Haanji?' (0.35s - 1.6s utterance + pause) -> AUTO-PAUSES!
-           - Ignores Caller Tunes (continuous music/songs) -> keeps waiting for human.
-           - Skips Voicemail / Carrier IVR announcements -> marks DNP.
-        2. Checks Asterisk Confbridge channels (length >= 2 = customer joined).
+        Monitor MCUBE telephony state with Non-DNP Disposition Form & 'On Call' Detection:
+        1. MCUBE Landing Page (https://vedantu.mcube.com/#/Home/landingpage):
+           - Detects 'On Call' status / widened disposition-width panel -> AUTO-PAUSES!
+           - Detects Non-DNP Disposition Form popup -> AUTO-PAUSES!
+           - Recognizes DNP / BUSY status -> marks DNP and advances!
+        2. Checks Asterisk Confbridge channels (length >= 2 = customer bridged).
         3. Checks Live MCUBE Call Log Row 0 (ANSWER vs BUSY).
         4. MiniController manual button ('Customer Answered') for 1-click override.
         """
@@ -1257,97 +1163,75 @@ class AutoDialer:
         self.ctrl.skip_lead.clear()
 
         await self.find_pages()
-        await self.start_human_voice_detector()
 
         start = time.time()
         saw_in_progress = False
 
-        try:
-            while time.time() - start < RING_TIMEOUT:
-                elapsed = int(time.time() - start)
-                remaining = int(RING_TIMEOUT - elapsed)
-                self.ctrl.status(f"📞 RINGING CUSTOMER... ({remaining}s)")
+        while time.time() - start < RING_TIMEOUT:
+            elapsed = int(time.time() - start)
+            remaining = int(RING_TIMEOUT - elapsed)
+            self.ctrl.status(f"📞 RINGING CUSTOMER... ({remaining}s)")
 
-                # Auto-click any remaining alert dialogs
-                await self.dismiss_alerts()
+            # Auto-click any remaining alert dialogs
+            await self.dismiss_alerts()
 
-                # 1. Manual override from MiniController
-                if self.ctrl.customer_answered.is_set():
-                    log("Customer Answer confirmed via Controller!", "OK")
-                    return "CONNECTED"
-
-                if self.ctrl.skip_lead.is_set():
-                    log("Manual Skip clicked", "WARN")
-                    return "SKIPPED"
-
-                # 2. Human Voice & Greeting Detection ('Hello' pattern)
-                voice_res = await self.poll_voice_detection()
-                if voice_res == "HUMAN_ANSWERED":
-                    log("🗣️ HUMAN VOICE GREETING DETECTED ('Hello' pattern confirmed) — AUTO-PAUSED!", "OK")
-                    return "CONNECTED"
-                elif voice_res == "VOICEMAIL":
-                    log("🤖 CARRIER IVR / VOICEMAIL DETECTED (Continuous speech) — SKIPPING LEAD (DNP)", "WARN")
-                    return "DNP"
-
-                # 3. Check MCUBE call status (Asterisk Confbridge & Row 0)
-                status = await self.check_call_status()
-                if status == "ANSWER":
-                    log("📞 CALL STATUS: ANSWER CONFIRMED — CUSTOMER CONNECTED!", "OK")
-                    return "CONNECTED"
-                elif status == "BUSY":
-                    log("MCUBE: Customer is BUSY (confirmed via call status) — moving to next lead", "WARN")
-                    return "DNP"
-
-                # 4. Check MCUBE popup status for ringing vs disconnect
-                if self.mcube and not self.mcube.is_closed():
-                    try:
-                        body = await self.mcube.inner_text("body")
-                        lower = body.lower()
-
-                        if any(k in lower for k in ["call in progress", "calling", "ringing"]):
-                            saw_in_progress = True
-
-                        # Check for Call ended / Disconnected
-                        if "call ended" in lower or "disconnected" in lower:
-                            await asyncio.sleep(0.5)
-                            voice_final = await self.poll_voice_detection()
-                            if voice_final == "HUMAN_ANSWERED":
-                                return "CONNECTED"
-                            status_final = await self.check_call_status()
-                            if status_final == "ANSWER":
-                                return "CONNECTED"
-                            log("MCUBE: Call ended without customer answer (DNP/BUSY)", "WARN")
-                            return "DNP"
-
-                        # If ringing stopped after at least 6s without customer pickup
-                        if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 6:
-                            await asyncio.sleep(0.8)
-                            voice_final = await self.poll_voice_detection()
-                            if voice_final == "HUMAN_ANSWERED":
-                                return "CONNECTED"
-                            status_final = await self.check_call_status()
-                            if status_final == "ANSWER":
-                                return "CONNECTED"
-                            log("MCUBE: Outgoing ring stopped (DNP/BUSY)", "WARN")
-                            return "DNP"
-
-                    except Exception:
-                        pass
-
-                await asyncio.sleep(0.25)
-
-            # Final check on timeout
-            voice_final = await self.poll_voice_detection()
-            if voice_final == "HUMAN_ANSWERED":
-                return "CONNECTED"
-            status_final = await self.check_call_status()
-            if status_final == "ANSWER":
+            # 1. Manual override from MiniController
+            if self.ctrl.customer_answered.is_set():
+                log("Customer Answer confirmed via Controller!", "OK")
                 return "CONNECTED"
 
-            log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not pick up", "WARN")
-            return "TIMEOUT"
-        finally:
-            await self.stop_human_voice_detector()
+            if self.ctrl.skip_lead.is_set():
+                log("Manual Skip clicked", "WARN")
+                return "SKIPPED"
+
+            # 2. Check MCUBE call status (Landing page disposition popup, Confbridge & Row 0)
+            status = await self.check_call_status()
+            if status == "ANSWER":
+                log("📞 CALL STATUS: ANSWER CONFIRMED (MCUBE Disposition / On Call pattern) — AUTO-PAUSED!", "OK")
+                return "CONNECTED"
+            elif status == "BUSY":
+                log("MCUBE: Customer is BUSY / DNP (confirmed via call status) — moving to next lead", "WARN")
+                return "DNP"
+
+            # 3. Check MCUBE popup status for ringing vs disconnect
+            if self.mcube and not self.mcube.is_closed():
+                try:
+                    body = await self.mcube.inner_text("body")
+                    lower = body.lower()
+
+                    if any(k in lower for k in ["call in progress", "calling", "ringing"]):
+                        saw_in_progress = True
+
+                    # Check for Call ended / Disconnected
+                    if "call ended" in lower or "disconnected" in lower:
+                        await asyncio.sleep(0.5)
+                        status_final = await self.check_call_status()
+                        if status_final == "ANSWER":
+                            return "CONNECTED"
+                        log("MCUBE: Call ended without customer answer (DNP/BUSY)", "WARN")
+                        return "DNP"
+
+                    # If ringing stopped after at least 6s without customer pickup
+                    if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 6:
+                        await asyncio.sleep(0.8)
+                        status_final = await self.check_call_status()
+                        if status_final == "ANSWER":
+                            return "CONNECTED"
+                        log("MCUBE: Outgoing ring stopped (DNP/BUSY)", "WARN")
+                        return "DNP"
+
+                except Exception:
+                    pass
+
+            await asyncio.sleep(0.3)
+
+        # Final check on timeout
+        status_final = await self.check_call_status()
+        if status_final == "ANSWER":
+            return "CONNECTED"
+
+        log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not pick up", "WARN")
+        return "TIMEOUT"
 
     async def return_to_grid(self):
         """
@@ -1407,9 +1291,26 @@ class AutoDialer:
             except Exception:
                 pass
 
+        def on_mcube_response(resp):
+            try:
+                if resp.status in (200, 201) and resp.request.method in ("POST", "PUT"):
+                    url = resp.url.lower()
+                    if any(k in url for k in ["disposition", "savedisposition", "calldisposition", "updatedisposition"]):
+                        log(f"MCUBE disposition save detected: {resp.url[:70]}", "OK")
+                        disposition_saved.set()
+            except Exception:
+                pass
+
         if self.lsq:
             try:
                 self.lsq.on("response", on_lsq_response)
+            except Exception:
+                pass
+
+        for p in self.mcube_pages:
+            try:
+                if not p.is_closed():
+                    p.on("response", on_mcube_response)
             except Exception:
                 pass
 
@@ -1423,6 +1324,12 @@ class AutoDialer:
             if self.lsq:
                 try:
                     self.lsq.remove_listener("response", on_lsq_response)
+                except Exception:
+                    pass
+            for p in self.mcube_pages:
+                try:
+                    if not p.is_closed():
+                        p.remove_listener("response", on_mcube_response)
                 except Exception:
                     pass
 
