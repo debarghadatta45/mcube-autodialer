@@ -83,6 +83,14 @@ TARGET_STAGES = [
     "Lead Connected"
 ]
 EXCLUDE_SUB_STAGES = [
+    "Open - Demo Done",
+    "Demo Done",
+    "Wave Form not filled",
+    "Waveform not filled",
+    "Wave Form",
+    "Waveform",
+    "Language Barrier",
+    "Language Barier",
     "Invalid Lead",
     "Not Interested",
     "Invalid",
@@ -807,20 +815,23 @@ class AutoDialer:
 
     async def get_lead_sub_stages(self) -> dict:
         """
-        Extract Sub Stage and Super Sub Stage from the Opportunity Details page.
+        Extract Stage, Sub Stage, and Super Sub Stage from the Opportunity Details page.
         """
         try:
             return await self.lsq.evaluate("""() => {
+                let stage = '';
                 let subStage = '';
                 let superSubStage = '';
 
-                // 1. Look for table rows where first cell matches Sub Stage or Super Sub Stage
+                // 1. Look for table rows where first cell matches Stage, Sub Stage or Super Sub Stage
                 const trs = Array.from(document.querySelectorAll('tr'));
                 for (const tr of trs) {
                     const cells = Array.from(tr.querySelectorAll('td, th'));
                     if (cells.length >= 2) {
                         const lbl = cells[0].innerText.trim();
-                        if (/^Sub\\s*Stage$/i.test(lbl)) {
+                        if (/^(Opportunity\\s*)?Stage$/i.test(lbl)) {
+                            stage = cells[1].innerText.trim();
+                        } else if (/^Sub\\s*Stage$/i.test(lbl)) {
                             subStage = cells[1].innerText.trim();
                         } else if (/^Super\\s*Sub\\s*Stage$/i.test(lbl)) {
                             superSubStage = cells[1].innerText.trim();
@@ -829,10 +840,14 @@ class AutoDialer:
                 }
 
                 // 2. Look for dt/dd or label/value pairs
-                if (!subStage || !superSubStage) {
+                if (!subStage || !superSubStage || !stage) {
                     const labels = Array.from(document.querySelectorAll('label, dt, .label, .field-label, span, div'));
                     for (const l of labels) {
                         const txt = l.innerText.trim();
+                        if (/^(Opportunity\\s*)?Stage$/i.test(txt) && !stage) {
+                            const next = l.nextElementSibling;
+                            if (next) stage = next.innerText.trim();
+                        }
                         if (/^Sub\\s*Stage$/i.test(txt) && !subStage) {
                             const next = l.nextElementSibling;
                             if (next) subStage = next.innerText.trim();
@@ -845,10 +860,13 @@ class AutoDialer:
                 }
 
                 // 3. Fallback: Parse body lines
-                if (!subStage || !superSubStage) {
+                if (!subStage || !superSubStage || !stage) {
                     const lines = (document.body.innerText || '').split('\\n');
                     for (let i = 0; i < lines.length; i++) {
                         const line = lines[i].trim();
+                        if (/^(Opportunity\\s*)?Stage$/i.test(line) && i + 1 < lines.length && !stage) {
+                            stage = lines[i + 1].trim();
+                        }
                         if (/^Sub\\s*Stage$/i.test(line) && i + 1 < lines.length && !subStage) {
                             subStage = lines[i + 1].trim();
                         }
@@ -858,10 +876,10 @@ class AutoDialer:
                     }
                 }
 
-                return { sub_stage: subStage, super_sub_stage: superSubStage };
+                return { stage: stage, sub_stage: subStage, super_sub_stage: superSubStage };
             }""")
         except Exception:
-            return {"sub_stage": "", "super_sub_stage": ""}
+            return {"stage": "", "sub_stage": "", "super_sub_stage": ""}
 
     async def confirm_yes(self):
         """
@@ -1626,28 +1644,34 @@ class AutoDialer:
                 if not await self.click_opportunity(lead):
                     continue
 
-                # Check Sub Stage & Super Sub Stage before calling (exclude Invalid Lead / Not Interested)
+                # Check Stage, Sub Stage & Super Sub Stage before calling (exclude Demo Done, Wave Form not filled, Language Barrier, Invalid Lead, etc.)
                 stages = await self.get_lead_sub_stages()
+                stg = stages.get("stage", "").strip() or lead.get("stage", "").strip()
                 sub = stages.get("sub_stage", "").strip()
                 super_sub = stages.get("super_sub_stage", "").strip()
-                if sub or super_sub:
-                    log(f"Lead Sub Stage: '{sub}' | Super Sub Stage: '{super_sub}'", "INFO")
+                if stg or sub or super_sub:
+                    log(f"Lead Stage: '{stg}' | Sub Stage: '{sub}' | Super Sub Stage: '{super_sub}'", "INFO")
 
                 should_skip = False
                 skip_reason = ""
                 for exc in EXCLUDE_SUB_STAGES:
-                    if sub and exc.lower() in sub.lower():
+                    exc_lower = exc.lower()
+                    if stg and exc_lower in stg.lower():
                         should_skip = True
-                        skip_reason = f"Sub Stage is '{sub}'"
+                        skip_reason = f"Stage is '{stg}' matches excluded '{exc}'"
                         break
-                    if super_sub and exc.lower() in super_sub.lower():
+                    if sub and exc_lower in sub.lower():
                         should_skip = True
-                        skip_reason = f"Super Sub Stage is '{super_sub}'"
+                        skip_reason = f"Sub Stage is '{sub}' matches excluded '{exc}'"
+                        break
+                    if super_sub and exc_lower in super_sub.lower():
+                        should_skip = True
+                        skip_reason = f"Super Sub Stage is '{super_sub}' matches excluded '{exc}'"
                         break
 
                 if should_skip:
-                    log(f"🚫 SKIPPING LEAD ({lead['name']}): {skip_reason} (Excluded sub-stage)", "WARN")
-                    self.ctrl.status(f"🚫 SKIPPED ({sub or super_sub})")
+                    log(f"🚫 SKIPPING LEAD ({lead['name']}): {skip_reason}", "WARN")
+                    self.ctrl.status(f"🚫 SKIPPED ({sub or super_sub or stg})")
                     await asyncio.sleep(1)
                     await self.return_to_grid()
                     continue
