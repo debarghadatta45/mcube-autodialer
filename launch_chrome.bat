@@ -60,7 +60,7 @@ echo [*] Launching Chrome on http://localhost:9222 ...
 echo [*] Initializing LeadSquared Opportunity Management and MCUBE Web Dialer...
 echo.
 
-start "" "%CHROME_EXE%" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir="%PROFILE_DIR%" --new-window "https://in21.leadsquared.com/OpportunityManagement?ec=12000" "https://dialer.mcube.com/index.html"
+start "" "%CHROME_EXE%" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir="%PROFILE_DIR%" --no-first-run --no-default-browser-check --disable-background-networking --disable-background-timer-throttling --disable-renderer-backgrounding --disable-extensions --disable-sync --disable-translate --disable-default-apps --disable-notifications --metrics-recording-only --no-pings --disk-cache-size=52428800 --renderer-process-limit=3 --new-window "https://in21.leadsquared.com/OpportunityManagement?ec=12000" "https://dialer.mcube.com/index.html"
 
 echo ===============================================================================
 echo [*] Chrome has been launched successfully!

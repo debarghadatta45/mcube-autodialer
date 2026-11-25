@@ -15,6 +15,7 @@ Fully verified on live LeadSquared DOM:
 
 import asyncio
 import datetime
+import gc
 import json
 import os
 import re
@@ -48,6 +49,17 @@ else:
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 STATE_PATH = os.path.join(APP_DIR, "session_state.json")
 LOG_PATH = os.path.join(APP_DIR, "autodialer.log")
+
+# Keep log file lightweight on low-spec/low-disk systems (cap at 1 MB)
+try:
+    if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 1024 * 1024:
+        with open(LOG_PATH, "rb") as _lf_r:
+            _lf_r.seek(-51200, os.SEEK_END)
+            _tail = _lf_r.read()
+        with open(LOG_PATH, "wb") as _lf_w:
+            _lf_w.write(_tail)
+except Exception:
+    pass
 
 class _FileLogger:
     def __init__(self, filepath):
@@ -233,35 +245,36 @@ def auto_launch_chrome():
             log("Google Chrome binary not found! Please install Chrome or launch it manually with port 9222.", "ERR")
             return False
 
-        log("Auto-launching Google Chrome on port 9222 with LS and MCUBE tabs...", "INFO")
+        log("Auto-launching Google Chrome on port 9222 with low-spec optimization flags...", "INFO")
+        low_spec_flags = [
+            "--remote-debugging-port=9222",
+            "--remote-allow-origins=*",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-extensions",
+            "--disable-sync",
+            "--disable-translate",
+            "--disable-default-apps",
+            "--disable-notifications",
+            "--metrics-recording-only",
+            "--no-pings",
+            "--disk-cache-size=52428800",
+            "--renderer-process-limit=3",
+            "--new-window",
+            LSQ_MANAGE_URL,
+            "https://dialer.mcube.com/index.html"
+        ]
         try:
             if sys.platform == "win32":
-                cmd = f'start "" "{chrome_bin}" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir="{profile_dir}" --no-first-run --no-default-browser-check --new-window "{LSQ_MANAGE_URL}" "https://dialer.mcube.com/index.html"'
+                flags_str = " ".join(f'"{f}"' if " " in f or "=" in f else f for f in low_spec_flags)
+                cmd = f'start "" "{chrome_bin}" {flags_str}'
                 subprocess.Popen(cmd, shell=True)
-            elif sys.platform == "darwin":
-                subprocess.Popen([
-                    chrome_bin,
-                    "--remote-debugging-port=9222",
-                    "--remote-allow-origins=*",
-                    f"--user-data-dir={profile_dir}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--new-window",
-                    LSQ_MANAGE_URL,
-                    "https://dialer.mcube.com/index.html"
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                subprocess.Popen([
-                    chrome_bin,
-                    "--remote-debugging-port=9222",
-                    "--remote-allow-origins=*",
-                    f"--user-data-dir={profile_dir}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--new-window",
-                    LSQ_MANAGE_URL,
-                    "https://dialer.mcube.com/index.html"
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen([chrome_bin] + low_spec_flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
             log(f"Failed to auto-launch Chrome: {e}", "ERR")
             return False
@@ -732,51 +745,49 @@ class AutoDialer:
 
     async def get_matching_rows(self):
         """
-        Find all table rows matching target stages.
-        Extracts ONLY the Opportunity link ('a[href*='OpportunityDetails']').
+        Find all table rows matching target stages in a single fast JS evaluation
+        (low-spec optimized: avoids 150+ CDP round-trips per page scan).
         """
-        rows = await self.lsq.locator("table tbody tr").all()
-        results = []
+        try:
+            raw_leads = await self.lsq.evaluate("""([targetStages, excludeStages, processedKeys]) => {
+                const results = [];
+                const processedSet = new Set(processedKeys);
+                const rows = document.querySelectorAll('table tbody tr');
+                const excLower = excludeStages.map(s => s.toLowerCase());
+                const tgtLower = targetStages.map(s => ({ orig: s, low: s.toLowerCase() }));
 
-        for row in rows:
-            try:
-                text = await row.inner_text()
+                for (const row of rows) {
+                    const text = (row.innerText || '');
+                    const lowText = text.toLowerCase();
 
-                # Skip if row text explicitly displays an excluded sub-stage
-                if any(exc.lower() in text.lower() for exc in EXCLUDE_SUB_STAGES):
-                    continue
+                    if (excLower.some(exc => lowText.includes(exc))) continue;
 
-                matched_stage = None
-                for stage in TARGET_STAGES:
-                    if stage.lower() in text.lower():
-                        matched_stage = stage
-                        break
+                    let matchedStage = null;
+                    for (const t of tgtLower) {
+                        if (lowText.includes(t.low)) {
+                            matchedStage = t.orig;
+                            break;
+                        }
+                    }
+                    if (!matchedStage) continue;
 
-                if not matched_stage:
-                    continue
+                    const oppLink = row.querySelector("a[href*='OpportunityDetails'], a[href*='opportunityId']");
+                    if (!oppLink) continue;
 
-                # Locate the OpportunityDetails link in this row
-                opp_candidates = row.locator("a[href*='OpportunityDetails'], a[href*='opportunityId']")
-                if await opp_candidates.count() > 0:
-                    opp_link = opp_candidates.first
-                    link_text = (await opp_link.inner_text()).strip()
-                    href = await opp_link.get_attribute("href") or ""
+                    const linkText = (oppLink.innerText || '').trim();
+                    const href = oppLink.getAttribute('href') || '';
+                    if (!linkText || linkText.startsWith('+91') || linkText.toLowerCase().includes('[no name]')) continue;
 
-                    if link_text and not link_text.startswith("+91") and "[no name]" not in link_text.lower():
-                        key = f"{link_text}_{href}"
-                        if key not in self.processed:
-                            results.append({
-                                "name": link_text,
-                                "stage": matched_stage,
-                                "key": key,
-                                "href": href,
-                                "locator": opp_link
-                            })
-
-            except Exception:
-                continue
-
-        return results
+                    const key = `${linkText}_${href}`;
+                    if (!processedSet.has(key)) {
+                        results.push({ name: linkText, stage: matchedStage, key: key, href: href });
+                    }
+                }
+                return results;
+            }""", [TARGET_STAGES, EXCLUDE_SUB_STAGES, list(self.processed)])
+            return raw_leads or []
+        except Exception:
+            return []
 
     async def click_opportunity(self, lead):
         """Click the Opportunity Name link to open Opportunity Details."""
@@ -785,29 +796,20 @@ class AutoDialer:
         self.ctrl.status("📂 OPENING OPPORTUNITY...")
 
         try:
-            # 1. Click via locator
             clicked = False
-            if lead.get("locator"):
-                try:
-                    await lead["locator"].click(timeout=3000)
-                    clicked = True
-                except Exception:
-                    pass
-
-            # 2. Fallback: by href or text
-            if not clicked:
-                loc = self.lsq.locator(f"table tbody tr a[href*='{lead['href']}']").first
-                if await loc.is_visible(timeout=2000):
-                    await loc.click()
+            if lead.get("href"):
+                loc = self.lsq.locator(f"table tbody tr a[href='{lead['href']}']").first
+                if await loc.count() > 0:
+                    await loc.click(timeout=3000)
                     clicked = True
 
             if not clicked:
                 loc = self.lsq.locator("table tbody tr a[href*='OpportunityDetails']", has_text=lead["name"]).first
                 await loc.click(timeout=5000)
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.0)
             await self.lsq.wait_for_load_state("domcontentloaded", timeout=15000)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             return True
         except Exception as e:
             log(f"Error opening opportunity: {e}", "ERR")
@@ -851,6 +853,11 @@ class AutoDialer:
                     }
                 }
 
+                // Early return if all 3 fields were extracted via fast selectors (avoids heavy DOM reflows)
+                if (stage && subStage && superSubStage) {
+                    return { stage: stage, sub_stage: subStage, super_sub_stage: superSubStage };
+                }
+
                 // 1. Look for table rows where first cell matches Stage, Sub Stage or Super Sub Stage
                 const trs = Array.from(document.querySelectorAll('tr'));
                 for (const tr of trs) {
@@ -867,9 +874,9 @@ class AutoDialer:
                     }
                 }
 
-                // 2. Look for dt/dd or label/value pairs
+                // 2. Look for dt/dd or label/value pairs (lightweight selector: skips generic div/span)
                 if (!subStage || !superSubStage || !stage) {
-                    const labels = Array.from(document.querySelectorAll('div, span, dt, .label, .field-label, label'));
+                    const labels = Array.from(document.querySelectorAll('label, dt, .activity-view-label, .field-label'));
                     for (const l of labels) {
                         const txt = l.innerText.trim();
                         if (/^(Opportunity\\s*)?Stage$/i.test(txt) && !stage) {
@@ -1066,48 +1073,34 @@ class AutoDialer:
 
     async def check_call_status(self) -> Optional[str]:
         """
-        Check across MCUBE Landing Page (https://vedantu.mcube.com/#/Home/landingpage),
-        Asterisk Confbridge channels, and the live call log table:
-        Returns:
-            "ANSWER" -> Customer answered / connected (trigger auto-pause)
-            "BUSY"   -> Customer is busy / rejected / failed / DNP (do not pause, mark DNP)
-            None     -> Still ringing / calling in progress
+        Consolidated low-CPU check across MCUBE Landing Page, Asterisk Confbridge, and Call Log Row 0.
+        Combines DOM + table inspection into a single evaluate() per page.
         """
-        # 1. MiniController manual button ('Customer Answered')
         if self.ctrl and self.ctrl.customer_answered.is_set():
             log("Customer answer confirmed via Controller button!", "OK")
             return "ANSWER"
 
-        # 2. Check MCUBE Landing Page (https://vedantu.mcube.com/#/Home/landingpage)
-        # Analyzes live .call-notification widget ('On Call', 'Calling', 'DNP', etc.)
-        # and non-DNP Disposition Form popup.
+        phone_tail = re.sub(r'\D', '', self.current_phone)[-4:] if self.current_phone else ""
+
+        # 1. Single consolidated evaluate() on vedantu.mcube.com (.call-notification + Disposition Form + Row 0)
         for p in self.mcube_pages:
             if p.is_closed() or "vedantu.mcube.com" not in p.url.lower():
                 continue
             try:
-                portal_state = await p.evaluate("""() => {
+                portal_state = await p.evaluate("""(phoneTail) => {
                     try {
-                        // A. Check .call-notification widget
                         let notif = document.querySelector('.call-notification');
                         if (notif) {
                             let text = (notif.innerText || '').toUpperCase();
                             let cls = (notif.className || '').toLowerCase();
-
-                            // Explicit DNP or Busy or Failed or Disconnected
-                            if (text.includes('DNP') || text.includes('BUSY') || text.includes('FAILED') || 
+                            if (text.includes('DNP') || text.includes('BUSY') || text.includes('FAILED') ||
                                 text.includes('NO ANSWER') || text.includes('CANCEL') || text.includes('AGENT BUSY')) {
                                 return 'BUSY';
                             }
-
-                            // Explicit Customer Answer / Connected:
-                            // MCUBE Angular template displays "On Call" when dialstatus == "ANSWER",
-                            // or adds "disposition-width" to the .call-notification class.
                             if (text.includes('ON CALL') || text.includes('ANSWER') || cls.includes('disposition-width')) {
                                 return 'ANSWER';
                             }
                         }
-
-                        // B. Check MCUBE Disposition Popup / Dialog / Overlay (.cdk-overlay-pane, .disposition-width, etc.)
                         let overlay = document.querySelector('.cdk-overlay-pane, .disposition-width, [class*="disposition-width"]');
                         if (overlay) {
                             let text = (overlay.innerText || '').toUpperCase();
@@ -1115,13 +1108,24 @@ class AutoDialer:
                                 if (text.includes('DNP') || text.includes('BUSY') || text.includes('FAILED') || text.includes('CANCEL')) {
                                     return 'BUSY';
                                 }
-                                // Non-DNP Disposition Form popup -> Customer picked up, call is connected!
                                 return 'ANSWER';
+                            }
+                        }
+                        let row = document.querySelector('table tbody tr');
+                        if (row) {
+                            let cells = row.querySelectorAll('td');
+                            if (cells.length >= 8) {
+                                let cust = cells[1].innerText || '';
+                                let st = (cells[7].innerText || '').toUpperCase().trim();
+                                if (!phoneTail || cust.includes(phoneTail)) {
+                                    if (st === 'ANSWER' || st === 'ANSWERED') return 'ANSWER';
+                                    if (st.includes('BUSY') || st === 'NO ANSWER' || st === 'DNP' || st === 'CANCEL') return 'BUSY';
+                                }
                             }
                         }
                     } catch(e) {}
                     return null;
-                }""")
+                }""", phone_tail)
                 if portal_state == "ANSWER":
                     log(f"MCUBE Landing Page ({p.url[:40]}): Call is CONNECTED ('On Call' / Non-DNP Disposition Form detected)!", "OK")
                     return "ANSWER"
@@ -1131,8 +1135,7 @@ class AutoDialer:
             except Exception:
                 pass
 
-        # 3. Check Asterisk Confbridge channels on dialer.mcube.com
-        # Leg-A has ConfbridgeChannels.length == 1; Leg-B (customer) joining makes length >= 2
+        # 2. Check Asterisk Confbridge channels on dialer.mcube.com
         if self.mcube and not self.mcube.is_closed():
             try:
                 conf_state = await self.mcube.evaluate("""() => {
@@ -1141,10 +1144,8 @@ class AutoDialer:
                             for (let id in userAgent.sessions) {
                                 let s = userAgent.sessions[id];
                                 if (s && s.data) {
-                                    let chans = s.data.ConfbridgeChannels || [];
-                                    if (chans.length >= 2) return 'ANSWER';
-                                    let events = s.data.ConfbridgeEvents || [];
-                                    if (events.length >= 2) return 'ANSWER';
+                                    if ((s.data.ConfbridgeChannels || []).length >= 2) return 'ANSWER';
+                                    if ((s.data.ConfbridgeEvents || []).length >= 2) return 'ANSWER';
                                 }
                             }
                         }
@@ -1157,52 +1158,11 @@ class AutoDialer:
             except Exception:
                 pass
 
-        # 4. Check Row 0 (most recent call) on vedantu.mcube.com live table
-        phone_tail = re.sub(r'\D', '', self.current_phone)[-4:] if self.current_phone else ""
-        for p in self.mcube_pages:
-            if p.is_closed() or "vedantu.mcube.com" not in p.url.lower():
-                continue
-            try:
-                row_status = await p.evaluate("""(phoneTail) => {
-                    try {
-                        let row = document.querySelector('table tbody tr');
-                        if (!row) return null;
-                        let cells = Array.from(row.querySelectorAll('td')).map(c => c.innerText.trim());
-                        if (cells.length < 8) return null;
-                        let cust = cells[1] || '';
-                        let st = (cells[7] || '').toUpperCase();
-                        if (!phoneTail || cust.includes(phoneTail)) {
-                            if (st === 'ANSWER' || st === 'ANSWERED') {
-                                return 'ANSWER';
-                            }
-                            if (st.includes('BUSY') || st === 'NO ANSWER' || st === 'DNP' || st === 'CANCEL') {
-                                return 'BUSY';
-                            }
-                        }
-                    } catch(e) {}
-                    return null;
-                }""", phone_tail)
-                if row_status == "ANSWER":
-                    log(f"MCUBE Live Call Log ({p.url[:40]}): Current call status is 'ANSWER'!", "OK")
-                    return "ANSWER"
-                elif row_status == "BUSY":
-                    log(f"MCUBE Live Call Log ({p.url[:40]}): Current call status is 'BUSY'!", "WARN")
-                    return "BUSY"
-            except Exception:
-                pass
-
         return None
 
     async def monitor_call(self):
         """
-        Monitor MCUBE telephony state with Non-DNP Disposition Form & 'On Call' Detection:
-        1. MCUBE Landing Page (https://vedantu.mcube.com/#/Home/landingpage):
-           - Detects 'On Call' status / widened disposition-width panel -> AUTO-PAUSES!
-           - Detects Non-DNP Disposition Form popup -> AUTO-PAUSES!
-           - Recognizes DNP / BUSY status -> marks DNP and advances!
-        2. Checks Asterisk Confbridge channels (length >= 2 = customer bridged).
-        3. Checks Live MCUBE Call Log Row 0 (ANSWER vs BUSY).
-        4. MiniController manual button ('Customer Answered') for 1-click override.
+        Low-spec optimized call monitor (0.6s poll cadence, single-evaluate state reads).
         """
         self.ctrl.status("📞 RINGING CUSTOMER...")
         self.ctrl.customer_answered.clear()
@@ -1212,16 +1172,18 @@ class AutoDialer:
 
         start = time.time()
         saw_in_progress = False
+        tick = 0
 
         while time.time() - start < RING_TIMEOUT:
             elapsed = int(time.time() - start)
             remaining = int(RING_TIMEOUT - elapsed)
             self.ctrl.status(f"📞 RINGING CUSTOMER... ({remaining}s)")
 
-            # Auto-click any remaining alert dialogs
-            await self.dismiss_alerts()
+            # Dismiss alerts periodically (every ~1.8s) to save CDP round-trips
+            if tick % 3 == 0:
+                await self.dismiss_alerts()
+            tick += 1
 
-            # 1. Manual override from MiniController
             if self.ctrl.customer_answered.is_set():
                 log("Customer Answer confirmed via Controller!", "OK")
                 return "CONNECTED"
@@ -1230,7 +1192,6 @@ class AutoDialer:
                 log("Manual Skip clicked", "WARN")
                 return "SKIPPED"
 
-            # 2. Check MCUBE call status (Landing page disposition popup, Confbridge & Row 0)
             status = await self.check_call_status()
             if status == "ANSWER":
                 log("📞 CALL STATUS: ANSWER CONFIRMED (MCUBE Disposition / On Call pattern) — AUTO-PAUSED!", "OK")
@@ -1239,41 +1200,38 @@ class AutoDialer:
                 log("MCUBE: Customer is BUSY / DNP (confirmed via call status) — moving to next lead", "WARN")
                 return "DNP"
 
-            # 3. Check MCUBE popup status for ringing vs disconnect
+            # Lightweight status check on dialer.mcube.com without serializing full body.innerText
             if self.mcube and not self.mcube.is_closed():
                 try:
-                    body = await self.mcube.inner_text("body")
-                    lower = body.lower()
-
-                    if any(k in lower for k in ["call in progress", "calling", "ringing"]):
+                    phone_ui = await self.mcube.evaluate("""() => {
+                        const lower = (document.body.innerText || '').toLowerCase();
+                        return {
+                            ringing: lower.includes('call in progress') || lower.includes('calling') || lower.includes('ringing'),
+                            ended: lower.includes('call ended') || lower.includes('disconnected')
+                        };
+                    }""")
+                    if phone_ui.get("ringing"):
                         saw_in_progress = True
 
-                    # Check for Call ended / Disconnected
-                    if "call ended" in lower or "disconnected" in lower:
+                    if phone_ui.get("ended"):
                         await asyncio.sleep(0.5)
-                        status_final = await self.check_call_status()
-                        if status_final == "ANSWER":
+                        if await self.check_call_status() == "ANSWER":
                             return "CONNECTED"
                         log("MCUBE: Call ended without customer answer (DNP/BUSY)", "WARN")
                         return "DNP"
 
-                    # If ringing stopped after at least 6s without customer pickup
-                    if saw_in_progress and not any(k in lower for k in ["call in progress", "calling", "ringing"]) and elapsed > 6:
+                    if saw_in_progress and not phone_ui.get("ringing") and elapsed > 6:
                         await asyncio.sleep(0.8)
-                        status_final = await self.check_call_status()
-                        if status_final == "ANSWER":
+                        if await self.check_call_status() == "ANSWER":
                             return "CONNECTED"
                         log("MCUBE: Outgoing ring stopped (DNP/BUSY)", "WARN")
                         return "DNP"
-
                 except Exception:
                     pass
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.6)
 
-        # Final check on timeout
-        status_final = await self.check_call_status()
-        if status_final == "ANSWER":
+        if await self.check_call_status() == "ANSWER":
             return "CONNECTED"
 
         log(f"Ring timeout ({RING_TIMEOUT}s) - Customer did not pick up", "WARN")
@@ -1744,7 +1702,11 @@ class AutoDialer:
                     log(f"LEAD SKIPPED: {lead['name']}", "WARN")
                     await self.return_to_grid()
 
-                await asyncio.sleep(1)
+                # Keep Python memory footprint lean on low-spec systems
+                if self.dialed % 15 == 0:
+                    gc.collect()
+
+                await asyncio.sleep(0.5)
 
         except Exception as e:
             log(f"Execution Error: {e}", "ERR")
