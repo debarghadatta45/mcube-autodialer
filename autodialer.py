@@ -818,10 +818,38 @@ class AutoDialer:
         Extract Stage, Sub Stage, and Super Sub Stage from the Opportunity Details page.
         """
         try:
+            try:
+                await self.lsq.wait_for_selector(".opportunity-status-data, .activity-view-control, [data-schema-name='mx_Custom_4']", timeout=4000)
+            except Exception:
+                pass
             return await self.lsq.evaluate("""() => {
                 let stage = '';
                 let subStage = '';
                 let superSubStage = '';
+
+                // 0. Direct LeadSquared Opportunity Details DOM selectors
+                const oppStatus = document.querySelector('.opportunity-status-data, [data-schema-name="Status"]');
+                if (oppStatus) stage = oppStatus.innerText.trim();
+
+                const subEl = document.querySelector('[data-schema-name="mx_Custom_4"]');
+                if (subEl) subStage = subEl.innerText.trim();
+
+                const superSubEl = document.querySelector('[data-schema-name="mx_Custom_12"]');
+                if (superSubEl) superSubStage = superSubEl.innerText.trim();
+
+                // 0b. LeadSquared .row-fluid.activity-view-edit label -> control pairs
+                const editRows = Array.from(document.querySelectorAll('.row-fluid.activity-view-edit, .activity-view-edit'));
+                for (const row of editRows) {
+                    const lblEl = row.querySelector('.activity-view-label, label');
+                    const valEl = row.querySelector('.activity-view-control');
+                    if (lblEl && valEl) {
+                        const lbl = lblEl.innerText.trim();
+                        const val = valEl.innerText.trim();
+                        if (/^(Opportunity\\s*)?Stage$/i.test(lbl) && !stage) stage = val;
+                        else if (/^Sub\\s*Stage$/i.test(lbl) && !subStage) subStage = val;
+                        else if (/^Super\\s*Sub\\s*Stage$/i.test(lbl) && !superSubStage) superSubStage = val;
+                    }
+                }
 
                 // 1. Look for table rows where first cell matches Stage, Sub Stage or Super Sub Stage
                 const trs = Array.from(document.querySelectorAll('tr'));
@@ -829,11 +857,11 @@ class AutoDialer:
                     const cells = Array.from(tr.querySelectorAll('td, th'));
                     if (cells.length >= 2) {
                         const lbl = cells[0].innerText.trim();
-                        if (/^(Opportunity\\s*)?Stage$/i.test(lbl)) {
+                        if (/^(Opportunity\\s*)?Stage$/i.test(lbl) && !stage) {
                             stage = cells[1].innerText.trim();
-                        } else if (/^Sub\\s*Stage$/i.test(lbl)) {
+                        } else if (/^Sub\\s*Stage$/i.test(lbl) && !subStage) {
                             subStage = cells[1].innerText.trim();
-                        } else if (/^Super\\s*Sub\\s*Stage$/i.test(lbl)) {
+                        } else if (/^Super\\s*Sub\\s*Stage$/i.test(lbl) && !superSubStage) {
                             superSubStage = cells[1].innerText.trim();
                         }
                     }
@@ -841,7 +869,7 @@ class AutoDialer:
 
                 // 2. Look for dt/dd or label/value pairs
                 if (!subStage || !superSubStage || !stage) {
-                    const labels = Array.from(document.querySelectorAll('label, dt, .label, .field-label, span, div'));
+                    const labels = Array.from(document.querySelectorAll('div, span, dt, .label, .field-label, label'));
                     for (const l of labels) {
                         const txt = l.innerText.trim();
                         if (/^(Opportunity\\s*)?Stage$/i.test(txt) && !stage) {
